@@ -1,5 +1,5 @@
 #!/usr/bin/env bash 
-# gost-api-cli.sh — GOST API 管理脚本（修复版）
+# gost-api-cli.sh — GOST API 管理脚本
 set -u
 
 API_URL="${GOST_API_URL:-http://127.0.0.1:18080}"
@@ -66,7 +66,39 @@ check_gost_api_status() {
   fi
 }
 
+# ===== 可选：确保依赖（如未在脚本中已有 ensure_dependencies，则使用此） =====
+ensure_dependencies() {
+  local SUDO="${1:-}"
+  [ -z "$SUDO" ] && [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
+  local need=()
+  command -v curl >/dev/null 2>&1 || need+=("curl")
+  command -v jq >/dev/null 2>&1 || need+=("jq")
+  command -v tar >/dev/null 2>&1 || need+=("tar")
+  command -v gzip >/dev/null 2>&1 || need+=("gzip")
+
+  if [ ${#need[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    $SUDO apt-get update -y || true
+    $SUDO apt-get install -y "${need[@]}" || true
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y "${need[@]}" || true
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y "${need[@]}" || true
+  elif command -v apk >/dev/null 2>&1; then
+    $SUDO apk add --no-cache "${need[@]}" || true
+  elif command -v pacman >/dev/null 2>&1; then
+    $SUDO pacman -Sy --noconfirm "${need[@]}" || true
+  elif command -v zypper >/dev/null 2>&1; then
+    $SUDO zypper install -y "${need[@]}" || true
+  else
+    echo "警告：未识别到包管理器，请手动安装： ${need[*]}"
+  fi
+  return 0
+}
 
 
 # ========== 检测 GOST 安装与运行状态 ==========
@@ -102,68 +134,228 @@ get_gost_status() {
 
 
 
-##########################################################
 install_gost_and_setup() {
-  # 安装 gost + 依赖，生成 /etc/gost/config.json，创建 systemd service 并启动
   set -e
   local SUDO=""
-  if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
+  [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
-  # 1) 检测并安装依赖：curl, ca-certificates, jq
-  echo "检测并安装依赖（curl, ca-certificates, jq）..."
-  if command -v apt-get >/dev/null 2>&1; then
-    $SUDO apt-get update -y
-    $SUDO apt-get install -y curl ca-certificates jq || true
-  elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y curl ca-certificates jq || true
-  elif command -v yum >/dev/null 2>&1; then
-    $SUDO yum install -y curl ca-certificates jq || true
-  elif command -v apk >/dev/null 2>&1; then
-    $SUDO apk add --no-cache curl ca-certificates jq || true
-  elif command -v pacman >/dev/null 2>&1; then
-    $SUDO pacman -Sy --noconfirm curl ca-certificates jq || true
-  elif command -v zypper >/dev/null 2>&1; then
-    $SUDO zypper install -y curl ca-certificates jq || true
-  else
-    echo "未识别到常见包管理器，请手动安装 curl / ca-certificates / jq。"
+  # 简单辅助：检测 HTTP code（用于内部逻辑）
+  _get_api_code() {
+    curl -s -o /dev/null -w "%{http_code}" --max-time 3 "${API_URL:-http://127.0.0.1:18080}/config" 2>/dev/null || echo "000"
+  }
+
+  # 智能依赖安装：仅安装缺失的工具
+  ensure_dependencies() {
+    local SUDO="$1"
+    [ -z "$SUDO" ] && [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+    local need=()
+    command -v curl >/dev/null 2>&1 || need+=("curl")
+    command -v jq >/dev/null 2>&1 || need+=("jq")
+    command -v tar >/dev/null 2>&1 || need+=("tar")
+    command -v gzip >/dev/null 2>&1 || need+=("gzip")
+    if [ ${#need[@]} -eq 0 ]; then
+      return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "使用 apt-get 安装依赖：${need[*]}"
+      $SUDO apt-get update -y || true
+      $SUDO apt-get install -y "${need[@]}" || true
+    elif command -v dnf >/dev/null 2>&1; then
+      $SUDO dnf install -y "${need[@]}" || true
+    elif command -v yum >/dev/null 2>&1; then
+      $SUDO yum install -y "${need[@]}" || true
+    elif command -v apk >/dev/null 2>&1; then
+      $SUDO apk add --no-cache "${need[@]}" || true
+    elif command -v pacman >/dev/null 2>&1; then
+      $SUDO pacman -Sy --noconfirm "${need[@]}" || true
+    elif command -v zypper >/dev/null 2>&1; then
+      $SUDO zypper install -y "${need[@]}" || true
+    else
+      echo "警告：未识别包管理器，请手动安装： ${need[*]}"
+      return 2
+    fi
+    return 0
+  }
+
+  # 决定是否使用 GitHub 镜像（如果在中国大陆会提示）
+  decide_github_proxy_for_cn() {
+    DOWNLOAD_PREFIX=""
+    local PROXIES=( \
+      "https://ghfast.top/"
+      "https://ghproxy.org/"
+      "https://download.fastgit.org/"
+      "https://ghproxy.cn/"
+    )
+    local country=""
+    # 多个服务尝试，提高成功率
+    country=$(curl -s --max-time 3 https://ipapi.co/country 2>/dev/null || true)
+    country=${country:-$(curl -s --max-time 3 https://ipinfo.io/country 2>/dev/null || true)}
+    country=${country:-$(curl -s --max-time 3 https://ifconfig.co/country_code 2>/dev/null || true)}
+    country=$(echo -n "${country}" | tr '[:lower:]' '[:upper:]')
+
+    if [ "${country}" = "CN" ]; then
+      echo "检测到可能位于中国大陆 (country=${country})，建议使用镜像以加速下载。"
+      read -rp "是否使用镜像下载二进制以加速? (Y/n) " yn
+      yn=${yn:-Y}
+      if [[ "${yn}" =~ ^[Yy]$ ]]; then
+        for p in "${PROXIES[@]}"; do
+          # 测试代理能否访问 raw.githubusercontent.com（HEAD）
+          if curl -s --head --max-time 4 "${p}raw.githubusercontent.com/" >/dev/null 2>&1; then
+            DOWNLOAD_PREFIX="$p"
+            echo "选用镜像: ${DOWNLOAD_PREFIX}"
+            break
+          fi
+        done
+        if [ -z "$DOWNLOAD_PREFIX" ]; then
+          echo "未检测到可用镜像代理，是否仍尝试使用首选代理 ${PROXIES[0]} ?"
+          read -rp "(y/N) " yn2
+          if [[ "${yn2}" =~ ^[Yy]$ ]]; then
+            DOWNLOAD_PREFIX="${PROXIES[0]}"
+          else
+            DOWNLOAD_PREFIX=""
+          fi
+        fi
+      else
+        DOWNLOAD_PREFIX=""
+        echo "将不使用镜像，直接从 GitHub 下载（可能较慢/失败）。"
+      fi
+    else
+      # 非中国，默认不使用镜像，可让用户强制选择
+      echo "检测到 country=${country:-unknown}，默认不使用镜像。"
+      read -rp "若要强制使用镜像以加速下载，请输入 y （否则回车跳过）: " usem
+      if [[ "${usem}" =~ ^[Yy]$ ]]; then
+        # pick first reachable proxy
+        for p in "${PROXIES[@]}"; do
+          if curl -s --head --max-time 4 "${p}raw.githubusercontent.com/" >/dev/null 2>&1; then
+            DOWNLOAD_PREFIX="$p"; break
+          fi
+        done
+        [ -n "$DOWNLOAD_PREFIX" ] && echo "选用镜像: ${DOWNLOAD_PREFIX}" || echo "未找到可用镜像，继续使用直连。"
+      fi
+    fi
+
+    if [ -n "$DOWNLOAD_PREFIX" ]; then
+      echo "注意：使用第三方镜像可能会将下载请求路由到该服务，请在受信任环境使用。"
+    fi
+
+    export DOWNLOAD_PREFIX
+    return 0
+  }
+
+  # ---------- 1) 若 API 已可达，则认为已安装并退出 ----------
+  local existing_code
+  existing_code=$(_get_api_code)
+  if [ "$existing_code" = "200" ]; then
+    # 打印人类可读状态（若用户已有 check_gost_api_status 函数，调用它）
+    if declare -f check_gost_api_status >/dev/null 2>&1; then
+      check_gost_api_status
+    else
+      echo "API 状态：✅ GOST API 已开放 (200)"
+    fi
+    echo "检测到 GOST API 已可用，跳过安装。"
+    return 0
   fi
 
-  # 2) 运行官方安装脚本（gost installer）
-  echo "开始安装 gost (会调用官方安装脚本)..."
-  # 使用子-shell以避免影响当前 shell 选项
-  if ! bash -c "bash <(curl -fsSL https://github.com/go-gost/gost/raw/master/install.sh) --install"; then
-    echo "警告：gost 安装脚本执行返回非零（可能已安装或网络问题）。继续后续配置..."
-  fi
+  echo "开始安装 GOST（因 API 当前不可用）..."
+  # 2) 安装缺失依赖（仅安装缺失项）
+  ensure_dependencies "$SUDO" || true
 
-  # 3) 确定 gost 二进制路径
-  local GOST_BIN
-  GOST_BIN="$(command -v gost 2>/dev/null || true)"
-  if [ -z "$GOST_BIN" ]; then
-    # 常见安装位置尝试
-    for p in /usr/local/bin/gost /usr/bin/gost /opt/gost/gost; do
-      if [ -x "$p" ]; then GOST_BIN="$p"; break; fi
-    done
-  fi
-  if [ -z "$GOST_BIN" ]; then
-    echo "错误：未能找到 gost 二进制（install 脚本可能未成功）。请手动确认 gost 已安装。"
+  # 3) 查找 GitHub Release 的 asset（latest）
+  local UNAME_M ARCH_LABEL latest_json api_url asset_url tag_name
+  UNAME_M=$(uname -m 2>/dev/null || echo "x86_64")
+  case "$UNAME_M" in
+    x86_64|amd64) ARCH_LABEL="linux_amd64" ;;
+    aarch64|arm64) ARCH_LABEL="linux_arm64" ;;
+    armv7*|armv6*) ARCH_LABEL="linux_armv7" ;;
+    *) ARCH_LABEL="linux_amd64" ;;
+  esac
+
+  api_url="https://api.github.com/repos/go-gost/gost/releases/latest"
+  latest_json=$(curl -fsSL "${api_url}" 2>/dev/null || "")
+  if [ -z "$latest_json" ]; then
+    echo "错误：无法从 GitHub API 获取 release 信息（网络或被限流）。"
     return 1
   fi
-  echo "gost 程序路径: ${GOST_BIN}"
 
-  # 4) 生成 /etc/gost/config.json（包含 api 配置）
-  local cfg="${CONFIG_FILE:-/etc/gost/config.json}"
-  echo "写入基础配置到 ${cfg}..."
+  tag_name=$(echo "$latest_json" | jq -r '.tag_name // .name // empty' 2>/dev/null || echo "")
+  # 优先匹配架构
+  asset_url=$(echo "$latest_json" | jq -r --arg arch "${ARCH_LABEL}" '.assets[]?.browser_download_url | select(test($arch))' 2>/dev/null | head -n1 || echo "")
+  # 回退匹配 linux_amd64
+  if [ -z "$asset_url" ]; then
+    asset_url=$(echo "$latest_json" | jq -r '.assets[]?.browser_download_url | select(test("linux_amd64"))' 2>/dev/null | head -n1 || echo "")
+  fi
+
+  if [ -z "$asset_url" ]; then
+    echo "错误：未在 release 中找到适合的 linux tarball（asset）。请手动下载并安装。"
+    return 2
+  fi
+
+  echo "发现 release: ${tag_name:-<unknown>}"
+  echo "asset url: ${asset_url}"
+
+  # 4) 决定是否使用 GitHub 镜像（会设置 DOWNLOAD_PREFIX）
+  decide_github_proxy_for_cn
+
+  # 5) 下载：优先使用 DOWNLOAD_PREFIX（若为空则直接下载 asset_url）
+  local tmpdir gost_candidate dest cfg download_url
+  tmpdir=$(mktemp -d /tmp/gost_install.XXXXXX)
+  trap 'rm -rf "$tmpdir" >/dev/null 2>&1 || true' EXIT
+  cd "$tmpdir" || return 3
+
+  # prepare download urls to try: prefixed first (if any), then direct
+  download_url=""
+  if [ -n "${DOWNLOAD_PREFIX:-}" ]; then
+    download_url="${DOWNLOAD_PREFIX}${asset_url}"
+  else
+    download_url="${asset_url}"
+  fi
+
+  echo "下载中（尝试）: ${download_url}"
+  if ! curl -fsSL -o gost_release.tar.gz "${download_url}"; then
+    echo "警告：使用首选方式下载失败： ${download_url}"
+    # 如果使用了代理，回退到直连尝试一次
+    if [ -n "${DOWNLOAD_PREFIX:-}" ]; then
+      echo "回退到直连下载（不使用镜像）: ${asset_url}"
+      if ! curl -fsSL -o gost_release.tar.gz "${asset_url}"; then
+        echo "错误：直连下载也失败，安装终止。"
+        rm -rf "$tmpdir" || true
+        return 4
+      fi
+    else
+      echo "错误：下载失败，安装终止。"
+      rm -rf "$tmpdir" || true
+      return 4
+    fi
+  fi
+
+  # 6) 解压并查找 gost 可执行
+  if ! tar -xzf gost_release.tar.gz; then
+    echo "错误：解压归档失败。"
+    rm -rf "$tmpdir" || true
+    return 5
+  fi
+
+  gost_candidate=$(find . -type f -name 'gost' -perm /111 -print -quit || true)
+  [ -z "$gost_candidate" ] && gost_candidate=$(find . -type f -name 'gost' -print -quit || true)
+  if [ -z "$gost_candidate" ]; then
+    echo "错误：未在解压内容中找到 gost 可执行文件。"
+    rm -rf "$tmpdir" || true
+    return 6
+  fi
+
+  # 7) 安装到 /usr/local/bin/gost
+  dest="/usr/local/bin/gost"
+  echo "安装 gost 到 ${dest} ..."
+  $SUDO install -m 0755 "$gost_candidate" "$dest" || { echo "错误：install 到 ${dest} 失败"; rm -rf "$tmpdir" || true; return 7; }
+  $SUDO chmod +x "$dest" || true
+
+  # 8) 写入最小 config.json（备份原文件）
+  cfg="${CONFIG_FILE:-/etc/gost/config.json}"
   $SUDO mkdir -p "$(dirname "$cfg")"
-
-  # 备份原文件（若存在）
   if [ -f "$cfg" ]; then
     $SUDO cp -a "$cfg" "${cfg}.backup.$(date +%Y%m%d_%H%M%S)" || true
   fi
-
-  # 最小 config.json：包含 api 地址和空 services 列表（如果你需要默认日志或其它字段，可扩展）
-  local tmpcfg
-  tmpcfg="$(mktemp)"
-  cat > "$tmpcfg" <<'JSON'
+  cat > "${tmpdir}/config.json" <<'JSON'
 {
   "api": {
     "addr": "127.0.0.1:18080"
@@ -171,23 +363,21 @@ install_gost_and_setup() {
   "services": []
 }
 JSON
+  $SUDO mv -f "${tmpdir}/config.json" "${cfg}"
+  $SUDO chmod 0644 "${cfg}" || true
 
-  # 把临时文件以原子方式移动到目标（需要 sudo）
-  $SUDO mv -f "$tmpcfg" "$cfg"
-  $SUDO chmod 0644 "$cfg" || true
-
-  # 5) 创建 systemd unit（如果 systemd 可用）
+  # 9) systemd 单元
   if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     local unit="/etc/systemd/system/gost.service"
-    echo "创建 systemd 单元 ${unit} ..."
-    $SUDO tee "$unit" >/dev/null <<EOF
+    echo "创建/更新 systemd 单元 ${unit} ..."
+    $SUDO tee "${unit}" >/dev/null <<EOF
 [Unit]
 Description=gost proxy
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${GOST_BIN} -C ${cfg}
+ExecStart=${dest} -C ${cfg}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
@@ -197,24 +387,52 @@ WantedBy=multi-user.target
 EOF
 
     $SUDO systemctl daemon-reload
-    $SUDO systemctl enable --now gost.service
-    # 短检查
-    sleep 1
-    if $SUDO systemctl is-active --quiet gost.service; then
-      echo "gost service 已启动并设置为开机自启 (systemd)."
+    $SUDO systemctl enable --now gost.service || true
+    # restart to ensure latest binary/config applied
+    $SUDO systemctl restart gost.service >/dev/null 2>&1 || $SUDO service gost restart >/dev/null 2>&1 || true
+
+    # 短暂等待再检测
+    sleep 2
+
+    local api_code
+    api_code=$(_get_api_code)
+    # 打印友好状态（优先调用用户自定义函数）
+    if declare -f check_gost_api_status >/dev/null 2>&1; then
+      check_gost_api_status
     else
-      echo "警告：gost service 未能成功启动，请用 'sudo systemctl status gost' 查看详情。"
+      if [ "$api_code" = "200" ]; then
+        echo "API 状态：✅ 正常连接"
+      else
+        echo "API 状态：❌ 无法访问（返回码 ${api_code}）"
+      fi
+    fi
+
+    if [ "$api_code" = "200" ]; then
+      echo "安装并启动成功：GOST API 已可用 (HTTP 200)."
+      rm -rf "$tmpdir" || true
+      trap - EXIT
+      return 0
+    else
+      echo "警告：GOST 启动后 API 仍不可用（HTTP ${api_code}）。请用 'systemctl status gost' 与 'journalctl -u gost' 排查。"
+      rm -rf "$tmpdir" || true
+      trap - EXIT
+      return 8
     fi
   else
-    # 没有 systemd 的回退：告诉用户如何手动运行
-    echo "警告：未检测到 systemd。脚本已写入 ${cfg}，但未创建 systemd service。"
-    echo "你可以通过以下命令启动 gost（后台运行示例）："
-    echo "  sudo nohup ${GOST_BIN} -C ${cfg} >/var/log/gost.log 2>&1 &"
+    echo "未检测到 systemd，已安装二进制并写入配置 ${cfg}。请手动后台运行："
+    echo "  sudo nohup ${dest} -C ${cfg} >/var/log/gost.log 2>&1 &"
+    # 打印状态供参考
+    if declare -f check_gost_api_status >/dev/null 2>&1; then
+      check_gost_api_status
+    fi
+    rm -rf "$tmpdir" || true
+    trap - EXIT
+    return 0
   fi
-
-  echo "安装与基础配置完成。若要创建默认转发，请使用脚本菜单或 API 创建并随后调用 '保存配置'。"
-  return 0
 }
+
+
+
 
 
 
@@ -375,7 +593,7 @@ list_transfers_table() {
     local="$(_trim "$local")"
     remote="$(_trim "$remote")"
     name="$(_trim "$name")"
-    printf "%-5s| %-25s| %-40s| %-25s\n" "$idx" "$local" "$remote" "$name"
+    printf "%-4s| %-19s| %-34s| %-25s\n" "$idx" "$local" "$remote" "$name"
   done <<<"$agg"
 
   printf '%*s\n' "$sep_len" '' | tr ' ' '-'
@@ -1040,6 +1258,15 @@ uninstall_gost() {
 
 # ========== 主菜单 ==========
 while true; do
+  API_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${API_URL}/config" 2>/dev/null || echo "000")
+  case "$API_CODE" in
+    200) API_STATUS_TXT="✅ GOST API 已开放 (200)";;
+    401) API_STATUS_TXT="⚠️ 需要认证 (401)";;
+    404) API_STATUS_TXT="⚠️ 返回 404（接口路径可能不同）";;
+    000) API_STATUS_TXT="❌ 无法连接到 GOST API";;
+    *)   API_STATUS_TXT="❌ 无法访问 GOST API (code=${API_CODE})";;
+  esac
+
   cat <<EOF
 
 ══════════════════════════════════════════════════════════
