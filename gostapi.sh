@@ -1,5 +1,5 @@
 #!/usr/bin/env bash 
-# gost-api-cli.sh — GOST API 管理脚本
+# gost-api-cli.sh — GOST API 管理脚本（修复版）
 set -u
 
 API_URL="${GOST_API_URL:-http://127.0.0.1:18080}"
@@ -197,7 +197,7 @@ decide_github_proxy_for_cn() {
 
   if [ "${country}" = "CN" ]; then
     echo "检测到可能位于中国大陆 (country=${country})，建议使用镜像以加速下载。"
-    read -rp "是否使用镜像下载二进制以加速? (Y/n) " yn
+    read -e -rp "是否使用镜像下载二进制以加速? (Y/n) " yn
     yn=${yn:-Y}
     if [[ "${yn}" =~ ^[Yy]$ ]]; then
       for p in "${PROXIES[@]}"; do
@@ -210,7 +210,7 @@ decide_github_proxy_for_cn() {
       done
       if [ -z "$DOWNLOAD_PREFIX" ]; then
         echo "未检测到可用镜像代理，是否仍尝试使用首选代理 ${PROXIES[0]} ?"
-        read -rp "(y/N) " yn2
+        read -e -rp "(y/N) " yn2
         if [[ "${yn2}" =~ ^[Yy]$ ]]; then
           DOWNLOAD_PREFIX="${PROXIES[0]}"
         fi
@@ -282,7 +282,6 @@ decide_github_proxy_for_cn() {
   fi
 
   echo "发现 release: ${tag_name:-<unknown>}"
-  echo "asset url: ${asset_url}"
 
   # 4) 决定是否使用 GitHub 镜像（会设置 DOWNLOAD_PREFIX）
   decide_github_proxy_for_cn
@@ -482,7 +481,7 @@ save_config_to_file() {
 
 
 
-# ========== 修复后的列表展示函数 ==========
+# ========== 列表展示函数 ==========
 list_transfers_table() {
   # 固定列宽（Realm 风格）
   local WIDTH_IDX=5
@@ -494,16 +493,28 @@ list_transfers_table() {
 
   echo
   echo "                   当前 GOST 转发规则                   "
-  printf "%-5s| %-25s| %-40s| %-25s\n" "序号" "本地地址:端口" "目标地址:端口" "转发名称"
   local sep_len=$((WIDTH_IDX + WIDTH_LOCAL + WIDTH_REMOTE + WIDTH_NAME + 9))
   printf '%*s\n' "$sep_len" '' | tr ' ' '-'
 
   # 拉取并规范 JSON（兼容多种返回形态）
   local raw list_json
-  raw=$(api_get_raw "/config/services")
+  raw=$(api_get_raw "/config/services" 2>/dev/null)
 
-  if [ -z "$(echo "$raw" | tr -d ' \n\r')" ]; then
+  if [ -z "$(echo -n "$raw" | tr -d ' \t\r\n')" ]; then
     echo "没有转发（空响应）"
+    printf '%*s\n' "$sep_len" '' | tr ' ' '-'
+    echo
+    read -n1 -r -s -p "按任意键返回主菜单..." && echo
+    return
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "未检测到 jq，无法以表格方式解析。请安装 jq。"
+    echo "原始返回（前 200 字符）："
+    echo "${raw:0:200}"
+    printf '%*s\n' "$sep_len" '' | tr ' ' '-'
+    echo
+    read -n1 -r -s -p "按任意键返回主菜单..." && echo
     return
   fi
 
@@ -513,85 +524,139 @@ list_transfers_table() {
   elif echo "$raw" | jq -e 'has("list")' >/dev/null 2>&1; then
     list_json=$(echo "$raw" | jq -c '.list' 2>/dev/null)
   else
-    # try raw type
     local typ
     typ=$(echo "$raw" | jq -r 'type' 2>/dev/null || echo "invalid")
     if [ "$typ" = "array" ]; then
       list_json="$raw"
     elif [ "$typ" = "object" ]; then
-      # wrap single object into array
       list_json=$(echo "[$raw]")
     else
-      # unknown or null
       list_json="null"
     fi
   fi
 
-  # robust判空：如果 list_json 为 null 或 空数组 -> 直接返回
-  # 兼容 jq 可能报错的情况，用一个安全的 count 计算
   local count
   count=$(echo "$list_json" | jq -r 'if .==null then 0 elif type=="array" then length elif type=="object" then 1 else 0 end' 2>/dev/null || echo 0)
-
   if [ "$count" -eq 0 ]; then
     echo "当前无转发规则。"
+    printf '%*s\n' "$sep_len" '' | tr ' ' '-'
+    echo
+    read -n1 -r -s -p "按任意键返回主菜单..." && echo
     return
   fi
 
-  # 生成 TSV：name, local addr, remote addr
+  # 生成 TSV：name, local addr, remote addr, chain(if any)
   local tsv
   tsv=$(echo "$list_json" | jq -r '
-    .[] |
+    .[]? |
     (
-      (.name // "unnamed") as $name |
+      (.name // "") as $name |
       (.addr // "-") as $local |
-      ((.forwarder.nodes[0].addr // .chain.nodes[0].addr // .nodes[0].addr // "-")) as $remote |
-      [$name, $local, $remote] | @tsv
+      (
+        (try .forwarder.nodes[0].addr // empty) |
+        (if .=="" then (try .chain.nodes[0].addr // empty) else . end)
+      ) as $remote |
+      (.handler.chain // "") as $chain |
+      [$name, $local, ($remote//"-"), $chain] | @tsv
     )
   ' 2>/dev/null)
 
-  # 如果 tsv 为空（保险判断），则说明没有实际条目
-  if [ -z "$(echo "$tsv" | tr -d ' \n\r')" ]; then
-    echo "当前无转发规则。"
+  if [ -z "$(echo -n "$tsv" | tr -d ' \t\r\n')" ]; then
+    echo "无法解析任何服务条目。"
+    printf '%*s\n' "$sep_len" '' | tr ' ' '-'
+    echo
+    read -n1 -r -s -p "按任意键返回主菜单..." && echo
     return
   fi
 
-  # 合并 -tcp/-udp，输出：idx \t local \t remote \t basename
-  local agg
-  agg=$(echo "$tsv" | awk -F'\t' '
+  # 使用 awk 合并 base 名称并区分 relay vs normal
+  # 输出格式：type|idx|base|local|remote
+  # type: R=relay, N=normal
+  local merged
+  merged=$(echo "$tsv" | awk -F'\t' '
   {
-    name=$1; local=$2; remote=$3
-    base=name; sub(/-tcp$/,"",base); sub(/-udp$/,"",base)
+    full=$1; local=$2; remote=$3; chain=$4
+    base=full
+    sub(/-tcp$/, "", base)
+    sub(/-udp$/, "", base)
+    # 当多个同 base 时先保留第一个 local/remote
     if (!(base in seen)) {
-      seen[base]=1; order[++n]=base
+      seen[base]=1
+      order[++n]=base
       locals[base]=local
       remotes[base]=remote
+      is_relay[base]=(chain!="" ? "R" : "N")
+    } else {
+      # 保证如果发现 chain 存在则标记为 relay
+      if (chain!="" && is_relay[base]!="R") is_relay[base]="R"
     }
   }
   END {
-    for (i=1;i<=n;i++) printf("%d\t%s\t%s\t%s\n", i, locals[order[i]], remotes[order[i]], order[i])
-  }')
+    for (i=1;i<=n;i++) {
+      b=order[i]
+      printf("%s|%d|%s|%s|%s\n", is_relay[b], i, b, locals[b], remotes[b])
+    }
+  }
+  ')
 
-  # 再次保险：如果 agg 为空，提示无条目
-  if [ -z "$(echo "$agg" | tr -d ' \n\r')" ]; then
-    echo "当前无转发规则。"
-    return
+  # 准备并打印两个表：普通转发 (N) 和 Relay 转发 (R)
+  # 公共表头函数
+  _print_table_header() {
+    local title="$1"
+    echo
+    printf "  %s\n" "$title"
+    printf "%-5s| %-25s| %-40s| %-25s\n" "序号" "本地地址:端口" "目标地址:端口" "转发名称"
+    printf '%*s\n' "$sep_len" '' | tr ' ' '-'
+  }
+
+  # 打印普通转发
+  echo
+  _print_table_header "1. 普通转发"
+  local printed=0
+  while IFS='|' read -r typ idx base local remote; do
+    if [ "$typ" = "N" ]; then
+      idx="$(_trim "$idx")"
+      base="$(_trim "$base")"
+      local="$(_trim "$local")"
+      remote="$(_trim "$remote")"
+      printf "%-4s| %-19s| %-34s| %-25s\n" " $idx" "$local" "$remote" "$base"
+      printed=$((printed+1))
+    fi
+  done <<<"$merged"
+
+  if [ "$printed" -eq 0 ]; then
+    printf "%-4s| %-19s| %-34s| %-25s\n" "-" "-" "-" "-"
   fi
-
-  # 打印行（Realm 风格固定宽度）
-  local idx local remote name
-  while IFS=$'\t' read -r idx local remote name; do
-    idx="$(_trim "$idx")"
-    local="$(_trim "$local")"
-    remote="$(_trim "$remote")"
-    name="$(_trim "$name")"
-    printf "%-5s| %-25s| %-40s| %-25s\n" "$idx" "$local" "$remote" "$name"
-  done <<<"$agg"
-
   printf '%*s\n' "$sep_len" '' | tr ' ' '-'
+
+  # 打印 Relay 转发
   echo
-  echo "总计: $(echo "$agg" | wc -l) 条转发"
+  _print_table_header "2. Relay 转发"
+  printed=0
+  while IFS='|' read -r typ idx base local remote; do
+    if [ "$typ" = "R" ]; then
+      idx="$(_trim "$idx")"
+      base="$(_trim "$base")"
+      local="$(_trim "$local")"
+      remote="$(_trim "$remote")"
+      printf "%-5s| %-25s| %-40s| %-25s\n" " $idx" "$local" "$remote" "$base"
+      printed=$((printed+1))
+    fi
+  done <<<"$merged"
+
+  if [ "$printed" -eq 0 ]; then
+    printf "%-4s| %-19s| %-34s| %-25s\n" "-" "-" "-" "-"
+  fi
+  printf '%*s\n' "$sep_len" '' | tr ' ' '-'
+
+  local total
+  total=$(echo "$merged" | wc -l)
   echo
+  echo "总计: ${total} 条转发（普通/Relay 已分别显示）"
+  echo
+  read -n1 -r -s -p "按任意键返回主菜单..." && echo
 }
+
 # ========== 添加转发（TCP+UDP），并带上 metadata ==========
 add_forward_combined() {
   echo "添加转发（同时创建 TCP + UDP）"
@@ -788,7 +853,7 @@ JSON
 add_relay_forward() {
   echo "创建 relay_forward 服务（同时创建 TCP & UDP service，并创建 chain）"
   while true; do
-    read -rp "本地转发端口 (例: 44111 / :44111 / 0.0.0.0:44111) : " laddr_raw
+    read -e -rp "本地转发端口 (例: 44111 / :44111 / 0.0.0.0:44111) : " laddr_raw
     if [ -n "$laddr_raw" ]; then
       break
     else
@@ -797,7 +862,7 @@ add_relay_forward() {
   done
 
   while true; do
-    read -rp "转发目标(落地)地址与端口（例如 192.168.1.1:44111）: " target_addr
+    read -e -rp "转发目标(落地)地址与端口（例如 192.168.1.1:44111）: " target_addr
     if [ -n "$target_addr" ]; then
       break
     else
@@ -806,7 +871,7 @@ add_relay_forward() {
   done
 
   while true; do
-    read -rp "Relay服务地址与端口 (例如 192.168.100.1:12345): " relay_addr
+    read -e -rp "Relay服务地址与端口 (例如 192.168.100.1:12345): " relay_addr
     if [ -n "$relay_addr" ]; then
       break
     else
@@ -821,7 +886,7 @@ add_relay_forward() {
   echo " 3) ws    （WebSocket）"
   echo " 4) wss   （加密 WebSocket）"
   echo " 5) kcp   （基于 UDP 的快速传输）"
-  read -rp "输入选项 [1-5] (默认 1): " dial_opt
+  read -e -rp "输入选项 [1-5] (默认 1): " dial_opt
   case "$dial_opt" in
     2) DIAL_TYPE="tcp"; DIAL_TLS="yes"  ;;
     3) DIAL_TYPE="ws";  DIAL_TLS="no"   ;;
@@ -845,14 +910,14 @@ add_relay_forward() {
   default_auth=$(gen_uuid)
 
   echo
-  read -rp "中转机是否启用了认证？(Y/n): " yn_auth
+  read -e -rp "中转机是否启用了认证？(Y/n): " yn_auth
   yn_auth=${yn_auth:-Y}
   if [[ "$yn_auth" =~ ^[Yy]$ ]]; then
     auth_enabled="yes"
     echo
     echo "中转认证 (connector.auth)：请输入中转机使用的用户名/密码。"
     while true; do
-      read -rp "中转认证用户名: " auth_user
+      read -e -rp "中转认证用户名: " auth_user
       if [ -n "$auth_user" ]; then
         break
       else
@@ -860,7 +925,7 @@ add_relay_forward() {
       fi
     done
 
-    read -rp "中转认证密码 (回车与用户名相同): " auth_pass
+    read -e -rp "中转认证密码 (回车与用户名相同): " auth_pass
     if [ -z "$auth_pass" ]; then
       auth_pass="$auth_user"
     fi
@@ -891,7 +956,7 @@ add_relay_forward() {
   # 基础名称与 chain/node 命名
   ts=$(date +%s)
   svc_base_default="relay_forward_${ts}"
-  read -rp "基础服务名称 (默认 ${svc_base_default}): " svc_base
+  read -e -rp "基础服务名称 (默认 ${svc_base_default}): " svc_base
   svc_base=${svc_base:-$svc_base_default}
   svc_tcp="${svc_base}-tcp"
   svc_udp="${svc_base}-udp"
@@ -1215,13 +1280,13 @@ JSON
 
 add_relay_listen() {
   echo "创建 Relay 监听服务"
-  read -rp "本地监听端口或地址 (12345 / :12345 / 127.0.0.1:12345) 默认 12345: " laddr_raw
+  read -e -rp "本地监听端口或地址 (12345 / :12345 / 127.0.0.1:12345) 默认 12345: " laddr_raw
   laddr_raw=${laddr_raw:-12345}
 
   ts=$(date +%s)
   relay_listen_base="relay_listen_${ts}"
 
-  read -rp "基础服务名称 (默认 ${relay_listen_base}): " base
+  read -e -rp "基础服务名称 (默认 ${relay_listen_base}): " base
   base=${svc_base:-$relay_listen_base}
 
   echo
@@ -1231,7 +1296,7 @@ add_relay_listen() {
   echo "  3) wss   （加密 WebSocket）"
   echo "  4) kcp   （基于 UDP 的快速传输）"
   echo "  5) tcp   （不加密，不推荐）"  
-  read -rp "输入选项 [1-5] (默认 1): " opt
+  read -e -rp "输入选项 [1-5] (默认 1): " opt
   case "$opt" in
     2) LISTENER_TYPE="ws" ;;
     3) LISTENER_TYPE="wss" ;;
@@ -1578,44 +1643,56 @@ delete_forward() {
 
 
 
-# ========== fetch_stats: 从 /config 读取并显示 stats（更可靠） ==========
+# ========== fetch_stats: 从 /config 读取并显示 stats ==========
 # usage: fetch_stats [SERVICE_NAME]
 fetch_stats() {
   local api="${API_URL}"
   local name="${1:-}"
 
-  # Ensure jq exists for pretty output
   if ! command -v jq >/dev/null 2>&1; then
     echo "请先安装 jq：apt install -y jq"
+    read -n1 -r -s -p "按任意键返回主菜单..." && echo
     return 1
   fi
 
-  # Trigger a full config fetch to encourage gost to refresh/aggregate runtime status
+  # 触发一次完整 /config 拉取，促使 gost 汇总最新状态
   curl -s "${api}/config" >/dev/null
 
-  if [ -n "${name}" ]; then
-    # single service: print stats only (JSON)
+  # jq 输出每一行：name \t totalConns \t currentConns \t inputBytes \t outputBytes
+  _jq_rows_all() {
     curl -s "${api}/config" \
-      | jq -r --arg NAME "${name}" '.services[]? | select(.name==$NAME) | .status.stats // .stats // {}'
-    return
-  fi
+      | jq -r '
+        .services[]? |
+        [
+          (.name // "-"),
+          ((.status.stats.totalConns // .stats.totalConns) // 0),
+          ((.status.stats.currentConns // .stats.currentConns) // 0),
+          ((.status.stats.inputBytes // .stats.inputBytes) // 0),
+          ((.status.stats.outputBytes // .stats.outputBytes) // 0)
+        ] | @tsv
+      '
+  }
 
-  # no name: list all services' stats as a readable table
-  curl -s "${api}/config" \
-    | jq -r '.services[]? | {name: .name, stats: (.status.stats // .stats // null)}' \
-    | jq -s '.' \
-    | jq -r '
-      (["NAME","TOTAL","CUR","IN","OUT"] | @tsv),
-      (.[] | [
-        .name,
-        ((.stats.totalConns // 0) | tostring),
-        ((.stats.currentConns // 0) | tostring),
-        ((.stats.inputBytes // 0) | tostring),
-        ((.stats.outputBytes // 0) | tostring)
-      ] | @tsv)
-    ' | awk -F'\t' '
+  _jq_row_single() {
+    local svc="$1"
+    curl -s "${api}/config" \
+      | jq -r --arg NAME "$svc" '
+        .services[]? | select(.name==$NAME) |
+        [
+          (.name // "-"),
+          ((.status.stats.totalConns // .stats.totalConns) // 0),
+          ((.status.stats.currentConns // .stats.currentConns) // 0),
+          ((.status.stats.inputBytes // .stats.inputBytes) // 0),
+          ((.status.stats.outputBytes // .stats.outputBytes) // 0)
+        ] | @tsv
+      '
+  }
+
+  # awk 表格打印（中文表头 + 人类可读字节）
+  _print_table_from_rows() {
+    awk -F'\t' '
       BEGIN {
-        printf "%-30s %8s %8s %12s %12s\n", "NAME", "TOTAL", "CUR", "IN", "OUT"
+        printf "%-36s %18s %15s %10s %14s\n", "名称", "累计连接", "当前连接", "接收", "发送"
         print "----------------------------------------------------------------------------------------"
       }
       function human(bytes,   v) {
@@ -1626,17 +1703,64 @@ fetch_stats() {
         return sprintf("%dB", v)
       }
       {
-        name=$1
-        total=$2
-        cur=$3
-        inb=$4
-        outb=$5
-        printf "%-30s %8s %8s %12s %12s\n", name, total, cur, human(inb), human(outb)
-      }'
+        name = $1
+        total = ($2+0)
+        cur = ($3+0)
+        inb = ($4+0)
+        outb = ($5+0)
+        printf "%-36s %10d %10d %12s %12s\n", name, total, cur, human(inb), human(outb)
+      }
+    '
+  }
+
+  # ---------- 全部服务表格模式 ----------
+  echo
+  echo "                                 当前服务统计信息（实时）                   "
+  echo "========================================================================================"
+  rows=$(_jq_rows_all)
+  if [ -z "$(echo -n "$rows" | tr -d ' \t\r\n')" ]; then
+    echo "未找到任何服务或无统计数据。"
+    echo
+    read -n1 -r -s -p "按任意键返回主菜单..." && echo
+    return
+  fi
+
+  # 打印表格（jq 只输出数据行，awk 打印表头）
+  printf "%s\n" "$rows" | _print_table_from_rows
+  echo "----------------------------------------------------------------------------------------"
+  echo
+  read -n1 -r -s -p "按 r 开始每 5 秒自动刷新（按任意键退出），或按任意键直接返回: " key
+  echo
+  if [ "$key" != "r" ]; then
+    return
+  fi
+
+  # 自动刷新表格模式
+  while true; do
+    clear
+    echo "                            当前服务统计信息（5s刷新）                   "
+    echo "========================================================================================"
+    rows=$(_jq_rows_all)
+    if [ -z "$(echo -n "$rows" | tr -d ' \t\r\n')" ]; then
+      echo "未找到任何服务或无统计数据。"
+    else
+      printf "%s\n" "$rows" | _print_table_from_rows
+    fi
+    echo "----------------------------------------------------------------------------------------"
+    # 如果在 5 秒内检测到任意键，则退出循环
+    if read -t 5 -n1 -r -s -p "" stop; then
+      echo
+      break
+    fi
+  done
+
+  return
 }
 
 
-# ===== reload_config: 热重载 /config/reload（兼容返回格式） =====
+
+
+# ===== reload_config: 热重载 /config/reload =====
 reload_config() {
   echo "正在热重载 GOST 配置 (/config/reload) ..."
   local resp code msg
@@ -1800,7 +1924,7 @@ restart_forward_v3() {
   done
 
   echo
-  read -rp "请输入序号 或 基础名 / 完整 service 名称 (回车取消): " sel
+  read -e -rp "请输入序号 或 基础名 / 完整 service 名称 (回车取消): " sel
   if [ -z "$sel" ]; then
     echo "已取消。"
     return 0
@@ -1850,11 +1974,11 @@ reload_or_restart_menu() {
 0) 返回主菜单
 ----------------------------
 EOF
-    read -rp "选择 (0-2): " opt
+    read -e -rp "选择 (0-2): " opt
     case "$opt" in
       1)
         # 提示是否先保存配置到文件，避免 reload 丢失 API 临时改动
-        read -rp "是否先保存当前配置到 ${CONFIG_FILE} 以避免 reload 丢失 API 临时配置？ (Y/n): " yn
+        read -e -rp "是否先保存当前配置到 ${CONFIG_FILE} 以避免 reload 丢失 API 临时配置？ (Y/n): " yn
         if [ -z "$yn" ] || [[ "$yn" =~ ^[Yy] ]]; then
           if save_config_to_file; then
             echo "已保存配置文件。"
@@ -1916,7 +2040,7 @@ add_forward_menu() {
  0) 返回上级菜单
 ----------------------------
 EOF
-    read -rp "请选择 (0-2): " subch
+    read -e -rp "请选择 (0-2): " subch
     case "$subch" in
       1)
         add_forward_combined
@@ -1943,22 +2067,15 @@ relay_menu() {
 Relay 转发（前置 + 中转机）
  1) 配置-F relay 入口机 
  2) 配置-L relay 中转机
- 3) 检查/列出已配置的 Relay 转发
  0) 返回
 EOF
-    read -rp "请选择: " rch
+    read -e -rp "请选择: " rch
     case "$rch" in
       1)
         add_relay_forward  # 你可以实现该函数（我可以直接写）
         ;;
       2)
         add_relay_listen
-        ;;
-      3)
-        # list_transfers_table 或自定义过滤 .handler.type == "relay"
-        echo "列出所有 handler.type == relay 的服务:"
-        api_get "/config/services" | jq '.data.services[]? | select(.handler.type=="relay") | {name,addr,listener,handler,forwarder}'
-        pause
         ;;
       0) break ;;
       *) echo "无效选择" ;;
@@ -1983,7 +2100,7 @@ while true; do
   cat <<EOF
 
 ══════════════════════════════════════════════════════════
-           GOST API 管理工具 V1.2 2025/11/11
+           GOST API 管理工具 V1.1 2025/11/7
 仓库地址：https://github.com/lengmo23/Gostapi_forward
 ══════════════════════════════════════════════════════════
 $(get_gost_status)
@@ -1996,12 +2113,12 @@ API: ${API_URL}
 2) 卸载 GOST
 ══════════════════════════════════════════════════════════
 3) 添加转发
-4) 列出所有转发
-5) 删除转发服务
+4) 查看转发
+5) 删除转发
 6) 重载服务
 ══════════════════════════════════════════════════════════
-7) 手动保存配置到文件
-8) 获取完整配置
+7) 保存配置到文件
+8) 获取完整API配置
 9) 查看实时流量统计
 ══════════════════════════════════════════════════════════
 0) 退出脚本
