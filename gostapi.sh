@@ -1,5 +1,5 @@
 #!/usr/bin/env bash 
-# gost-api-cli.sh — GOST API 管理脚本
+# gost-api-cli.sh — GOST API 管理脚本（修复版）
 set -u
 
 API_URL="${GOST_API_URL:-http://127.0.0.1:18080}"
@@ -134,6 +134,7 @@ get_gost_status() {
 
 
 
+
 install_gost_and_setup() {
   set -e
   local SUDO=""
@@ -178,69 +179,59 @@ install_gost_and_setup() {
   }
 
   # 决定是否使用 GitHub 镜像（如果在中国大陆会提示）
-  decide_github_proxy_for_cn() {
-    DOWNLOAD_PREFIX=""
-    local PROXIES=( \
-      "https://ghfast.top/"
-      "https://ghproxy.org/"
-      "https://download.fastgit.org/"
-      "https://ghproxy.cn/"
-    )
-    local country=""
-    # 多个服务尝试，提高成功率
-    country=$(curl -s --max-time 3 https://ipapi.co/country 2>/dev/null || true)
-    country=${country:-$(curl -s --max-time 3 https://ipinfo.io/country 2>/dev/null || true)}
-    country=${country:-$(curl -s --max-time 3 https://ifconfig.co/country_code 2>/dev/null || true)}
-    country=$(echo -n "${country}" | tr '[:lower:]' '[:upper:]')
+decide_github_proxy_for_cn() {
+  DOWNLOAD_PREFIX=""
+  local PROXIES=( \
+    "https://ghproxy.com/https://"
+    "https://ghproxy.net/https://"
+    "https://ghproxy.org/https://"
+    "https://download.fastgit.org/https://"
+    "https://ghproxy.cn/https://"
+  )
+  local country=""
+  # 多个服务尝试，提高成功率
+  country=$(curl -s --max-time 3 https://ipapi.co/country 2>/dev/null || true)
+  country=${country:-$(curl -s --max-time 3 https://ipinfo.io/country 2>/dev/null || true)}
+  country=${country:-$(curl -s --max-time 3 https://ifconfig.co/country_code 2>/dev/null || true)}
+  country=$(echo -n "${country}" | tr '[:lower:]' '[:upper:]')
 
-    if [ "${country}" = "CN" ]; then
-      echo "检测到可能位于中国大陆 (country=${country})，建议使用镜像以加速下载。"
-      read -rp "是否使用镜像下载二进制以加速? (Y/n) " yn
-      yn=${yn:-Y}
-      if [[ "${yn}" =~ ^[Yy]$ ]]; then
-        for p in "${PROXIES[@]}"; do
-          # 测试代理能否访问 raw.githubusercontent.com（HEAD）
-          if curl -s --head --max-time 4 "${p}raw.githubusercontent.com/" >/dev/null 2>&1; then
-            DOWNLOAD_PREFIX="$p"
-            echo "选用镜像: ${DOWNLOAD_PREFIX}"
-            break
-          fi
-        done
-        if [ -z "$DOWNLOAD_PREFIX" ]; then
-          echo "未检测到可用镜像代理，是否仍尝试使用首选代理 ${PROXIES[0]} ?"
-          read -rp "(y/N) " yn2
-          if [[ "${yn2}" =~ ^[Yy]$ ]]; then
-            DOWNLOAD_PREFIX="${PROXIES[0]}"
-          else
-            DOWNLOAD_PREFIX=""
-          fi
+  if [ "${country}" = "CN" ]; then
+    echo "检测到可能位于中国大陆 (country=${country})，建议使用镜像以加速下载。"
+    read -rp "是否使用镜像下载二进制以加速? (Y/n) " yn
+    yn=${yn:-Y}
+    if [[ "${yn}" =~ ^[Yy]$ ]]; then
+      for p in "${PROXIES[@]}"; do
+        # 测试代理能否访问 raw.githubusercontent.com（HEAD）
+        if curl -s --head --max-time 4 "${p}raw.githubusercontent.com/" >/dev/null 2>&1; then
+          DOWNLOAD_PREFIX="$p"
+          echo "选用镜像: ${DOWNLOAD_PREFIX}"
+          break
         fi
-      else
-        DOWNLOAD_PREFIX=""
-        echo "将不使用镜像，直接从 GitHub 下载（可能较慢/失败）。"
+      done
+      if [ -z "$DOWNLOAD_PREFIX" ]; then
+        echo "未检测到可用镜像代理，是否仍尝试使用首选代理 ${PROXIES[0]} ?"
+        read -rp "(y/N) " yn2
+        if [[ "${yn2}" =~ ^[Yy]$ ]]; then
+          DOWNLOAD_PREFIX="${PROXIES[0]}"
+        fi
       fi
     else
-      # 非中国，默认不使用镜像，可让用户强制选择
-      echo "检测到 country=${country:-unknown}，默认不使用镜像。"
-      read -rp "若要强制使用镜像以加速下载，请输入 y （否则回车跳过）: " usem
-      if [[ "${usem}" =~ ^[Yy]$ ]]; then
-        # pick first reachable proxy
-        for p in "${PROXIES[@]}"; do
-          if curl -s --head --max-time 4 "${p}raw.githubusercontent.com/" >/dev/null 2>&1; then
-            DOWNLOAD_PREFIX="$p"; break
-          fi
-        done
-        [ -n "$DOWNLOAD_PREFIX" ] && echo "选用镜像: ${DOWNLOAD_PREFIX}" || echo "未找到可用镜像，继续使用直连。"
-      fi
+      DOWNLOAD_PREFIX=""
+      echo "将不使用镜像，直接从 GitHub 下载（可能较慢/失败）。"
     fi
+  else
+    # 非中国大陆，直接跳过，无需询问
+    DOWNLOAD_PREFIX=""
+  fi
 
-    if [ -n "$DOWNLOAD_PREFIX" ]; then
-      echo "注意：使用第三方镜像可能会将下载请求路由到该服务，请在受信任环境使用。"
-    fi
+  if [ -n "$DOWNLOAD_PREFIX" ]; then
+    echo "注意：使用第三方镜像可能会将下载请求路由到该服务，请在受信任环境使用。"
+  fi
 
-    export DOWNLOAD_PREFIX
-    return 0
-  }
+  export DOWNLOAD_PREFIX
+  return 0
+}
+
 
   # ---------- 1) 若 API 已可达，则认为已安装并退出 ----------
   local existing_code
@@ -593,7 +584,7 @@ list_transfers_table() {
     local="$(_trim "$local")"
     remote="$(_trim "$remote")"
     name="$(_trim "$name")"
-    printf "%-4s| %-19s| %-34s| %-25s\n" "$idx" "$local" "$remote" "$name"
+    printf "%-5s| %-25s| %-40s| %-25s\n" "$idx" "$local" "$remote" "$name"
   done <<<"$agg"
 
   printf '%*s\n' "$sep_len" '' | tr ' ' '-'
@@ -794,6 +785,553 @@ JSON
 }
 
 
+add_relay_forward() {
+  echo "创建 relay_forward 服务（同时创建 TCP & UDP service，并创建 chain）"
+  while true; do
+    read -rp "本地转发端口 (例: 44111 / :44111 / 0.0.0.0:44111) : " laddr_raw
+    if [ -n "$laddr_raw" ]; then
+      break
+    else
+      echo "❌ 转发端口不能为空，请重新输入。"
+    fi
+  done
+
+  while true; do
+    read -rp "转发目标(落地)地址与端口（例如 192.168.1.1:44111）: " target_addr
+    if [ -n "$target_addr" ]; then
+      break
+    else
+      echo "❌ 目标地址不能为空，请重新输入。"
+    fi
+  done
+
+  while true; do
+    read -rp "Relay服务地址与端口 (例如 192.168.100.1:12345): " relay_addr
+    if [ -n "$relay_addr" ]; then
+      break
+    else
+      echo "❌ 中转机地址与端口不能为空，请重新输入。"
+    fi
+  done
+
+  echo
+  echo "请选择中转机的加密方式（dialer 传输类型）:"
+  echo " 1) tcp   （不加密，默认）"
+  echo " 2) tls   （TCP + TLS）"
+  echo " 3) ws    （WebSocket）"
+  echo " 4) wss   （加密 WebSocket）"
+  echo " 5) kcp   （基于 UDP 的快速传输）"
+  read -rp "输入选项 [1-5] (默认 1): " dial_opt
+  case "$dial_opt" in
+    2) DIAL_TYPE="tcp"; DIAL_TLS="yes"  ;;
+    3) DIAL_TYPE="ws";  DIAL_TLS="no"   ;;
+    4) DIAL_TYPE="ws";  DIAL_TLS="yes"  ;;
+    5) DIAL_TYPE="kcp"; DIAL_TLS="no"   ;;
+    *) DIAL_TYPE="tcp"; DIAL_TLS="no"   ;;
+  esac
+
+  # ===== 中转 auth（username/password） =====
+  # 默认生成 uuid（如果系统有 uuidgen 使用它，否则用 openssl/sha1 fallback）
+  gen_uuid() {
+    if command -v uuidgen >/dev/null 2>&1; then
+      uuidgen
+    elif command -v openssl >/dev/null 2>&1; then
+      openssl rand -hex 16
+    else
+      echo "$(date +%s)-$RANDOM" | sha1sum | awk '{print $1}'
+    fi
+  }
+
+  default_auth=$(gen_uuid)
+
+  echo
+  read -rp "中转机是否启用了认证？(Y/n): " yn_auth
+  yn_auth=${yn_auth:-Y}
+  if [[ "$yn_auth" =~ ^[Yy]$ ]]; then
+    auth_enabled="yes"
+    echo
+    echo "中转认证 (connector.auth)：请输入中转机使用的用户名/密码。"
+    while true; do
+      read -rp "中转认证用户名: " auth_user
+      if [ -n "$auth_user" ]; then
+        break
+      else
+        echo "❌ 中转认证用户名不能为空，请重新输入。"
+      fi
+    done
+
+    read -rp "中转认证密码 (回车与用户名相同): " auth_pass
+    if [ -z "$auth_pass" ]; then
+      auth_pass="$auth_user"
+    fi
+  else
+    echo "已选择：中转机未启用认证，将不生成 connector.auth 字段。"
+    auth_enabled="no"
+    auth_user=""
+    auth_pass=""
+  fi
+
+
+  # 规范本地监听 addr（如果只给端口则加冒号）
+  _norm_addr_simple() {
+    local x="$1"
+    x="$(echo -n "$x" | tr -d ' \t\r\n')"
+    if [ -z "$x" ]; then
+      printf ""
+      return
+    fi
+    if echo "$x" | grep -Eq '^[0-9]+$'; then
+      printf "[::]:%s" "$x"
+    else
+      printf "%s" "$x"
+    fi
+  }
+  laddr=$(_norm_addr_simple "$laddr_raw")
+
+  # 基础名称与 chain/node 命名
+  ts=$(date +%s)
+  svc_base_default="relay_forward_${ts}"
+  read -rp "基础服务名称 (默认 ${svc_base_default}): " svc_base
+  svc_base=${svc_base:-$svc_base_default}
+  svc_tcp="${svc_base}-tcp"
+  svc_udp="${svc_base}-udp"
+  chain_name="${svc_base}-chain-${ts}"
+  hop_name="${svc_base}-hop-0"
+  node_name="${svc_base}-node-0"
+
+  # 解析 relay_addr（去掉 query，处理 path）
+  addr_with_possible_path="$(echo "${relay_addr}" | sed -E 's/\?.*//')"
+  if [ "$DIAL_TYPE" = "ws" ]; then
+    addr_part="${addr_with_possible_path}"
+  else
+    addr_part="$(echo "${addr_with_possible_path}" | sed -E 's#/.*$##')"
+  fi
+  addr_part="$(echo -n "${addr_part}" | sed -E 's/^[[:space:]]+//' | sed -E 's/[[:space:]]+$//' | sed -E 's#^/*##')"
+
+  if [ -z "$addr_part" ]; then
+    echo "无法解析中转地址（addr）。请检查输入：${relay_addr}"
+    pause
+    return
+  fi
+
+  host_only="$(echo "${addr_part}" | sed -E 's/:.*$//')"
+
+  # ===== 构造 connector.auth 块 =====
+  connector_auth_json=$(cat <<JSON
+{
+  "auth": {
+    "username": "${auth_user}",
+    "password": "${auth_pass}"
+  }
+}
+JSON
+)
+
+  # 构造 node json（connector + dialer），将 connector 包含 auth
+  if [ "$DIAL_TYPE" = "kcp" ]; then
+    node_json=$(cat <<JSON
+{
+  "name": "${node_name}",
+  "addr": "${addr_part}",
+  "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
+  "dialer": { "type": "kcp" }
+}
+JSON
+)
+  elif [ "$DIAL_TYPE" = "ws" ]; then
+    if [ "$DIAL_TLS" = "yes" ]; then
+      node_json=$(cat <<JSON
+{
+  "name": "${node_name}",
+  "addr": "${addr_part}",
+  "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
+  "dialer": { "type": "ws", "tls": { "serverName": "${host_only}", "secure": true } }
+}
+JSON
+)
+    else
+      node_json=$(cat <<JSON
+{
+  "name": "${node_name}",
+  "addr": "${addr_part}",
+  "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
+  "dialer": { "type": "ws" }
+}
+JSON
+)
+    fi
+  else
+    # tcp (可能带 tls)
+    if [ "$DIAL_TLS" = "yes" ]; then
+      node_json=$(cat <<JSON
+{
+  "name": "${node_name}",
+  "addr": "${addr_part}",
+  "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
+  "dialer": { "type": "tcp", "tls": { "serverName": "${host_only}", "secure": true } }
+}
+JSON
+)
+    else
+      node_json=$(cat <<JSON
+{
+  "name": "${node_name}",
+  "addr": "${addr_part}",
+  "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
+  "dialer": { "type": "tcp" }
+}
+JSON
+)
+    fi
+  fi
+
+  # chain payload (single hop single node)
+  chain_payload=$(cat <<JSON
+{
+  "name": "${chain_name}",
+  "hops": [
+    {
+      "name": "${hop_name}",
+      "nodes": [
+        ${node_json}
+      ]
+    }
+  ]
+}
+JSON
+)
+
+  # service payloads (tcp + udp) — 包含 metadata enableStats 等
+  metadata_block=$(cat <<JSON
+{
+  "enableStats": true,
+  "observer.period": "5s",
+  "observer.resetTraffic": false
+}
+JSON
+)
+
+  payload_tcp=$(cat <<JSON
+{
+  "name": "${svc_tcp}",
+  "addr": "${laddr}",
+  "handler": {
+    "type": "tcp",
+    "chain": "${chain_name}"
+  },
+  "listener": {
+    "type": "tcp"
+  },
+  "forwarder": {
+    "nodes": [
+      {
+        "name": "target-0",
+        "addr": "${target_addr}"
+      }
+    ]
+  },
+  "metadata": ${metadata_block}
+}
+JSON
+)
+
+  payload_udp=$(cat <<JSON
+{
+  "name": "${svc_udp}",
+  "addr": "${laddr}",
+  "handler": {
+    "type": "udp",
+    "chain": "${chain_name}"
+  },
+  "listener": {
+    "type": "udp",
+    "metadata": {
+      "backlog": "128",
+      "keepalive": true,
+      "readBufferSize": "212992",
+      "readQueueSize": "1000",
+      "ttl": "30s",
+      "relay": "udp"
+    }
+  },
+  "forwarder": {
+    "nodes": [
+      {
+        "name": "target-0",
+        "addr": "${target_addr}",
+        "network": "udp"
+      }
+    ]
+  },
+  "metadata": ${metadata_block}
+}
+JSON
+)
+
+  echo
+  echo "准备创建 chain (${chain_name}) 并引用到 service (${svc_tcp} & ${svc_udp}) ..."
+  # 1) POST chain
+  resp_chain=$(api_post_raw "/config/chains" "${chain_payload}")
+  body_chain=$(echo "${resp_chain}" | sed '$d')
+  code_chain=$(echo "${resp_chain}" | tail -n1)
+
+  # fallback merge function (requires jq)
+  _merge_into_config_and_put() {
+    if ! command -v jq >/dev/null 2>&1; then
+      echo "错误：fallback 合并需要 jq，但系统未安装 jq。无法合并。"
+      return 1
+    fi
+    cfg=$(api_get_raw "/config")
+    if [ -z "$(echo -n "${cfg}" | tr -d ' \t\r\n')" ]; then
+      echo "错误：读取 /config 失败或为空，无法合并。"
+      return 2
+    fi
+    tmp=$(mktemp) || tmp="/tmp/gost_config_tmp.$$"
+    tmp2=$(mktemp) || tmp2="/tmp/gost_config_tmp2.$$"
+    echo "${cfg}" | jq --argjson chain "${chain_payload}" '
+      if has("chains") then
+        .chains |= (if . == null then [ $chain ] else (. + [ $chain ]) end)
+      else
+        . + { "chains": [ $chain ] }
+      end
+    ' >"${tmp}" 2>/dev/null || { rm -f "${tmp}"; echo "jq 合并 chain 失败"; return 3; }
+    echo "$(cat "${tmp}")" | jq --argjson svc "${payload_tcp}" '
+      if has("services") then
+        .services |= (if . == null then [ $svc ] else (. + [ $svc ]) end)
+      else
+        . + { "services": [ $svc ] }
+      end
+    ' >"${tmp2}" 2>/dev/null || { rm -f "${tmp}" "${tmp2}"; echo "jq 合并 tcp service 失败"; return 4; }
+
+    # append udp as well
+    mv "${tmp2}" "${tmp}"
+    echo "$(cat "${tmp}")" | jq --argjson svc "${payload_udp}" '
+      if has("services") then
+        .services |= (if . == null then [ $svc ] else (. + [ $svc ]) end)
+      else
+        . + { "services": [ $svc ] }
+      end
+    ' >"${tmp2}" 2>/dev/null || { rm -f "${tmp}" "${tmp2}"; echo "jq 合并 udp service 失败"; return 4; }
+
+    put_resp=$(api_put_raw "/config" "$(cat "${tmp2}")")
+    put_body=$(echo "${put_resp}" | sed '$d' 2>/dev/null)
+    put_code=$(echo "${put_resp}" | tail -n1 2>/dev/null)
+    rm -f "${tmp}" "${tmp2}"
+    if echo "${put_code}" | grep -Eq '^[0-9]+$' && [ "${put_code}" -ge 200 ] 2>/dev/null && [ "${put_code}" -lt 300 ] 2>/dev/null; then
+      return 0
+    else
+      echo "PUT /config 返回 ${put_code}"
+      echo "${put_body}" | _pp
+      return 5
+    fi
+  }
+
+  # Check chain creation success
+  if echo "${code_chain}" | grep -Eq '^[0-9]+$' && [ "${code_chain}" -ge 200 ] 2>/dev/null && [ "${code_chain}" -lt 300 ] 2>/dev/null; then
+    echo "chain 创建成功 (POST /config/chains). 继续创建 TCP & UDP service..."
+
+    # create TCP
+    resp_tcp=$(api_post_raw "/config/services" "${payload_tcp}")
+    body_tcp=$(echo "${resp_tcp}" | sed '$d')
+    code_tcp=$(echo "${resp_tcp}" | tail -n1)
+
+    # create UDP
+    resp_udp=$(api_post_raw "/config/services" "${payload_udp}")
+    body_udp=$(echo "${resp_udp}" | sed '$d')
+    code_udp=$(echo "${resp_udp}" | tail -n1)
+
+    # helper check
+    _is_ok_code() { local c=$1; if echo "$c" | grep -Eq '^[0-9]+$' && [ "$c" -ge 200 ] 2>/dev/null && [ "$c" -lt 300 ] 2>/dev/null; then return 0; fi; return 1; }
+
+    _is_ok_code "$code_tcp" && tcp_ok=1 || tcp_ok=0
+    _is_ok_code "$code_udp" && udp_ok=1 || udp_ok=0
+
+    if [ "$tcp_ok" -eq 1 ] && [ "$udp_ok" -eq 1 ]; then
+      echo "✅ 已同时创建 ${svc_tcp} 与 ${svc_udp}."
+      echo "中转认证 (username/password):"
+      printf "  %s\n" "${auth_user}"
+      printf "  %s\n" "${auth_pass}"
+      # save config silently if function exists
+      if declare -f save_config_to_file >/dev/null 2>&1; then
+        save_config_to_file >/dev/null 2>&1 || true
+      fi
+      pause
+      return 0
+    fi
+
+    # rollback logic
+    if [ "$tcp_ok" -eq 1 ] && [ "$udp_ok" -eq 0 ]; then
+      echo "注意：TCP 创建成功但 UDP 创建失败 -> 回滚 TCP (${svc_tcp}) ..."
+      api_delete_raw "/config/services/${svc_tcp}" >/dev/null 2>&1 || true
+      echo "请检查 UDP 错误信息:"
+      echo "HTTP ${code_udp}"
+      echo "${body_udp}" | _pp
+      # 尝试删除 chain（若由我们新建且未被其它服务引用，尽力删除）
+      api_delete_raw "/config/chains/${chain_name}" >/dev/null 2>&1 || true
+      pause
+      return 2
+    fi
+
+    if [ "$udp_ok" -eq 1 ] && [ "$tcp_ok" -eq 0 ]; then
+      echo "注意：UDP 创建成功但 TCP 创建失败 -> 回滚 UDP (${svc_udp}) ..."
+      api_delete_raw "/config/services/${svc_udp}" >/dev/null 2>&1 || true
+      echo "请检查 TCP 错误信息:"
+      echo "HTTP ${code_tcp}"
+      echo "${body_tcp}" | _pp
+      api_delete_raw "/config/chains/${chain_name}" >/dev/null 2>&1 || true
+      pause
+      return 2
+    fi
+
+    # both failed
+    echo "创建失败：TCP/UDP 均未成功创建。"
+    echo "TCP 返回: HTTP ${code_tcp}"
+    echo "${body_tcp}" | _pp
+    echo "UDP 返回: HTTP ${code_udp}"
+    echo "${body_udp}" | _pp
+    api_delete_raw "/config/chains/${chain_name}" >/dev/null 2>&1 || true
+    pause
+    return 3
+
+  else
+    # fallback: merge into /config using jq
+    echo "POST /config/chains 返回 ${code_chain}, 尝试通过 PUT /config 合并 chain + services（需要 jq）..."
+    if _merge_into_config_and_put; then
+      echo "✅ 通过 PUT /config 合并 chain + service 成功。"
+      if declare -f save_config_to_file >/dev/null 2>&1; then
+        save_config_to_file >/dev/null 2>&1 || true
+      fi
+      pause
+      return 0
+    else
+      echo "❌ 合并失败。POST /config/chains 返回："
+      echo "HTTP ${code_chain}"
+      echo "${body_chain}" | _pp
+      pause
+      return 4
+    fi
+  fi
+}
+
+add_relay_listen() {
+  echo "创建 Relay 监听服务"
+  read -rp "本地监听端口或地址 (12345 / :12345 / 127.0.0.1:12345) 默认 12345: " laddr_raw
+  laddr_raw=${laddr_raw:-12345}
+
+  ts=$(date +%s)
+  relay_listen_base="relay_listen_${ts}"
+
+  read -rp "基础服务名称 (默认 ${relay_listen_base}): " base
+  base=${svc_base:-$relay_listen_base}
+
+  echo
+  echo "请选择加密类型:"
+  echo "  1) tls   （推荐）"
+  echo "  2) ws    （WebSocket）"
+  echo "  3) wss   （加密 WebSocket）"
+  echo "  4) kcp   （基于 UDP 的快速传输）"
+  echo "  5) tcp   （不加密，不推荐）"  
+  read -rp "输入选项 [1-5] (默认 1): " opt
+  case "$opt" in
+    2) LISTENER_TYPE="ws" ;;
+    3) LISTENER_TYPE="wss" ;;
+    4) LISTENER_TYPE="kcp" ;;
+    5) LISTENER_TYPE="tcp" ;;
+    *) LISTENER_TYPE="tls" ;;
+  esac
+
+  # ---- 规范化本地地址 ----
+  _normalize_local_addr_for_input() {
+    local input="$1"
+    input="$(echo -n "$input" | tr -d ' \t\r\n')"
+    if [ -z "$input" ]; then
+      echo ""
+      return
+    fi
+    if echo "$input" | grep -Eq '^[0-9]+$'; then
+      echo "[::]:${input}"
+    else
+      echo "$input"
+    fi
+  }
+  laddr=$(_normalize_local_addr_for_input "$laddr_raw")
+  
+  # ---- 生成 UUID（user 与 password 相同）----
+  gen_uuid() {
+    if command -v uuidgen >/dev/null 2>&1; then
+      uuidgen
+    elif [ -r /proc/sys/kernel/random/uuid ]; then
+      cat /proc/sys/kernel/random/uuid
+    elif command -v openssl >/dev/null 2>&1; then
+      openssl rand -hex 8
+    else
+      echo "$(date +%s)-$$"
+    fi
+  }
+  UUID_VAL=$(gen_uuid)
+  USERNAME="${UUID_VAL}"
+  PASSWORD="${UUID_VAL}"
+
+  # ---- 构造 payload ----
+  NAME="${base}"
+  ADDR="${laddr}"
+
+  payload=$(cat <<JSON
+{
+  "name": "${NAME}",
+  "addr": "${ADDR}",
+  "handler": {
+    "type": "relay",
+    "auth": {
+      "username": "${USERNAME}",
+      "password": "${PASSWORD}"
+    }
+  },
+  "listener": {
+    "type": "${LISTENER_TYPE}"
+  }
+}
+JSON
+)
+
+  echo
+  echo "创建监听服务：relay+${LISTENER_TYPE}://${ADDR} ..."
+  resp=$(api_post_raw "/config/services" "${payload}")
+  body=$(echo "${resp}" | sed '$d')
+  code=$(echo "${resp}" | tail -n1)
+
+  if echo "$code" | grep -Eq '^[0-9]+$'; then
+    code_num=$code
+  else
+    code_num=0
+  fi
+
+  if [ "$code_num" -ge 200 ] 2>/dev/null && [ "$code_num" -lt 300 ] 2>/dev/null; then
+    echo "✅ 创建成功: ${NAME}"
+    echo "认证信息："
+    echo "  用户名 / 密码: ${UUID_VAL}"
+    echo "  监听类型: ${LISTENER_TYPE}"
+    echo "请保存好上述 UUID，用于客户端认证连接。"
+
+    if declare -f save_config_to_file >/dev/null 2>&1; then
+      if save_config_to_file >/dev/null 2>&1; then
+        echo "配置已保存到 ${CONFIG_FILE}"
+      else
+        echo "⚠️ 保存配置失败，请手动保存配置。"
+      fi
+    fi
+  else
+    echo "❌ 创建失败 (HTTP ${code_num}):"
+    echo "${body}" | _pp
+  fi
+
+  pause
+}
+
+
+
+
+
 # ========== 显示可用的基础转发名（去掉 -tcp/-udp） ==========
 show_available_bases() {
   # 从 /config/services 获取所有 name，去掉 -tcp/-udp 后缀并去重
@@ -828,32 +1366,19 @@ show_available_bases() {
   echo "当前可用的基础转发名:"
   echo "$names" | nl -w2 -s'. ' 
 }
-# ========== 删除转发（修复 data.list 为 null 的情况） ==========
+# ========== 删除转发（支持删除与基础名相关的所有 services & 关联 chains，包括 relay_forward / relay_listen） ==========
 delete_forward() {
-  # 从 API 获取服务数据
+  # 从 API 获取服务数据（兼容 data.list 为 null）
   local raw
   raw=$(api_get_raw "/config/services" 2>/dev/null)
 
-  # 如果无返回
-  if [ -z "$(echo "$raw" | tr -d ' \n\r')" ]; then
+  if [ -z "$(echo -n "$raw" | tr -d ' \t\r\n')" ]; then
     echo "未能从 API 获取服务列表或当前无服务。"
     pause
     return
   fi
 
-  # 检查 count 或 list 是否为 null / 空数组
-  local count
-  count=$(echo "$raw" | jq -r 'try (.data.count // (if type=="array" then length else 0 end)) catch 0' 2>/dev/null || echo 0)
-  local is_null_list
-  is_null_list=$(echo "$raw" | jq -r 'try (.data.list == null) catch false' 2>/dev/null || echo "false")
-
-  if [ "$count" -eq 0 ] || [ "$is_null_list" = "true" ]; then
-    echo "当前没有可删除的转发。"
-    pause
-    return
-  fi
-
-  # 生成去重基础名列表
+  # 提取去重的基础名列表（把 -tcp/-udp 后缀去掉）
   local names_list
   names_list=$(echo "$raw" | jq -r '
     if type=="object" then
@@ -867,67 +1392,190 @@ delete_forward() {
     | sub("\\-udp$";"")
   ' 2>/dev/null | sort -u | awk "NF")
 
-  # 读入数组
+  # 读取到数组
   local -a BASES=()
   while IFS= read -r line; do
     [ -n "$line" ] && BASES+=("$line")
   done <<< "$names_list"
 
   if [ "${#BASES[@]}" -eq 0 ]; then
-    echo "当前没有可删除的转发。"
+    echo "当前没有可删除的转发（或 API 返回格式异常）。"
     pause
     return
   fi
 
-  # 显示编号列表
+  # 列出可删除的基础名并让用户选择（编号或直接输入）
   echo "可删除的基础转发名："
   local i
   for i in "${!BASES[@]}"; do
     printf "  %2d) %s\n" "$((i+1))" "${BASES[$i]}"
   done
   echo
-
-  # 用户输入编号或名称
-  read -e -rp "输入编号或直接输入服务名称 (直接回车返回上级菜单): " choice
+  read -e -rp "输入编号 或 直接输入基础名 / 完整 service 名称 (回车取消): " choice
   if [ -z "$choice" ]; then
     echo "已取消。"
     pause
     return
   fi
 
-  local svc_name=""
+  local svc_base=""
   if echo "$choice" | grep -Eq '^[0-9]+$'; then
     if [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -le "${#BASES[@]}" ] 2>/dev/null; then
-      svc_name="${BASES[$((choice-1))]}"
+      svc_base="${BASES[$((choice-1))]}"
     else
       echo "编号超出范围"
       pause
       return
     fi
   else
-    svc_name="$choice"
+    svc_base="$choice"
   fi
 
-  # 构建删除列表（只删 -tcp / -udp）
-  declare -a to_delete
-  if echo "$svc_name" | grep -Eq '\-tcp$|\-udp$'; then
-    to_delete+=("$svc_name")
-  else
-    to_delete+=("${svc_name}-tcp")
-    to_delete+=("${svc_name}-udp")
+  # 从 /config/services 再次拉取所有服务名，找出包含 svc_base 的那些服务（更宽松匹配）
+  local all_services
+  all_services=$(echo "$raw" | jq -r '
+    if type=="object" then
+      if has("data") and (.data|has("list")) then .data.list
+      elif has("list") then .list
+      else [.] end
+    else .
+    end
+    | .[]?.name // empty
+  ' 2>/dev/null)
+
+  # 过滤出要删除的服务：包含基础名或等于 base-tcp/base-udp
+  local -a to_delete=()
+  while IFS= read -r s; do
+    [ -z "$s" ] && continue
+    if [ "$s" = "${svc_base}-tcp" ] || [ "$s" = "${svc_base}-udp" ] || echo "$s" | grep -Fq "$svc_base"; then
+      to_delete+=("$s")
+    fi
+  done <<< "$all_services"
+
+  # 如果用户输入了完整 service 名称（包含 -tcp/-udp）且上面没匹配到，直接尝试删除该名称
+  if [ "${#to_delete[@]}" -eq 0 ]; then
+    if echo "$svc_base" | grep -Eq '\-tcp$|\-udp$'; then
+      to_delete+=("$svc_base")
+    fi
   fi
 
-  # 静默删除
+  if [ "${#to_delete[@]}" -eq 0 ]; then
+    echo "未找到与 '${svc_base}' 匹配的任何 service。"
+    pause
+    return
+  fi
+
+  # 显示将删除的服务（简洁）
+  echo
+  echo "将删除以下 service（直接执行，无需二次确认）："
   for s in "${to_delete[@]}"; do
-    api_delete_raw "/config/services/${s}" >/dev/null 2>&1 || true
+    echo "  - $s"
+  done
+  echo
+
+  # 执行删除并汇总结果（静默输出 API body，但不交互）
+  local -a deleted=() failed=() notfound=()
+  for s in "${to_delete[@]}"; do
+    resp=$(api_delete_raw "/config/services/${s}" 2>/dev/null)
+    body=$(echo "${resp}" | sed '$d' 2>/dev/null)
+    code=$(echo "${resp}" | tail -n1 2>/dev/null)
+
+    if echo "$code" | grep -Eq '^[0-9]+$' && [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 300 ] 2>/dev/null; then
+      deleted+=("$s")
+    else
+      # 判定 404 / not found
+      if [ "$code" = "404" ] || echo "$body" | grep -qi 'not found\|404'; then
+        notfound+=("$s")
+      else
+        failed+=("${s}|${code}|${body}")
+      fi
+    fi
   done
 
-  # 静默保存配置
+  # 尝试删除可能关联的 chains：获取 /config/chains（兼容性处理）
+  local chain_raw chains
+  chain_raw=$(api_get_raw "/config/chains" 2>/dev/null || true)
+  if [ -n "$(echo -n "$chain_raw" | tr -d ' \t\r\n')" ]; then
+    chains=$(echo "$chain_raw" | jq -r '
+      if type=="object" then
+        if has("data") and (.data|has("list")) then .data.list
+        elif has("list") then .list
+        else [.] end
+      else .
+      end
+      | .[]?.name // empty
+    ' 2>/dev/null)
+  else
+    chains=""
+  fi
+
+  # 找到包含 svc_base 的 chain 名称并删除
+  local -a deleted_chains=() failed_chains=() notfound_chains=()
+  if [ -n "$(echo -n "$chains" | tr -d ' \t\r\n')" ]; then
+    while IFS= read -r cname; do
+      [ -z "$cname" ] && continue
+      if echo "$cname" | grep -Fq "$svc_base"; then
+        respc=$(api_delete_raw "/config/chains/${cname}" 2>/dev/null)
+        bodyc=$(echo "${respc}" | sed '$d' 2>/dev/null)
+        codec=$(echo "${respc}" | tail -n1 2>/dev/null)
+        if echo "$codec" | grep -Eq '^[0-9]+$' && [ "$codec" -ge 200 ] 2>/dev/null && [ "$codec" -lt 300 ] 2>/dev/null; then
+          deleted_chains+=("$cname")
+        else
+          if [ "$codec" = "404" ] || echo "$bodyc" | grep -qi 'not found\|404'; then
+            notfound_chains+=("$cname")
+          else
+            failed_chains+=("${cname}|${codec}|${bodyc}")
+          fi
+        fi
+      fi
+    done <<< "$chains"
+  fi
+
+  # 最后尝试持久化配置（静默）
   save_config_to_file >/dev/null 2>&1 || true
 
-  echo "删除转发服务完成"
+  # 输出简洁汇总
+  echo
+  echo "删除操作完成："
+  if [ "${#deleted[@]}" -gt 0 ]; then
+    echo " 已删除 services (${#deleted[@]}):"
+    for x in "${deleted[@]}"; do echo "  - $x"; done
+  fi
+  if [ "${#notfound[@]}" -gt 0 ]; then
+    echo " 未找到/已不存在 (${#notfound[@]}):"
+    for x in "${notfound[@]}"; do echo "  - $x"; done
+  fi
+  if [ "${#failed[@]}" -gt 0 ]; then
+    echo " 删除失败 (${#failed[@]}):"
+    for x in "${failed[@]}"; do
+      svc="${x%%|*}"; rest="${x#*|}"
+      code="${rest%%|*}"; body="${rest#*|}"
+      echo "  - ${svc} (HTTP ${code})"
+      echo "    返回: $(echo "$body" | tr '\n' ' ' | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    done
+  fi
+
+  if [ "${#deleted_chains[@]}" -gt 0 ]; then
+    echo " 已删除 chains (${#deleted_chains[@]}):"
+    for x in "${deleted_chains[@]}"; do echo "  - $x"; done
+  fi
+  if [ "${#notfound_chains[@]}" -gt 0 ]; then
+    echo " chains 未找到/已不存在 (${#notfound_chains[@]}):"
+    for x in "${notfound_chains[@]}"; do echo "  - $x"; done
+  fi
+  if [ "${#failed_chains[@]}" -gt 0 ]; then
+    echo " chains 删除失败 (${#failed_chains[@]}):"
+    for x in "${failed_chains[@]}"; do
+      cname="${x%%|*}"; rest="${x#*|}"; code="${rest%%|*}"; body="${rest#*|}"
+      echo "  - ${cname} (HTTP ${code})"
+      echo "    返回: $(echo "$body" | tr '\n' ' ' | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+    done
+  fi
+
+  echo
   pause
 }
+
 
 
 # ========== fetch_stats: 从 /config 读取并显示 stats（更可靠） ==========
@@ -1255,6 +1903,71 @@ uninstall_gost() {
 }
 
 
+# ========== 添加转发 子菜单（普通 / 加密） ==========
+add_forward_menu() {
+  while true; do
+    cat <<EOF
+
+----------------------------
+  添加转发（子菜单）
+----------------------------
+ 1) 普通转发（同时创建 TCP + UDP）
+ 2) Relay转发（前置+中转机）
+ 0) 返回上级菜单
+----------------------------
+EOF
+    read -rp "请选择 (0-2): " subch
+    case "$subch" in
+      1)
+        add_forward_combined
+        break
+        ;;
+      2)
+        relay_menu
+        break
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        echo "无效选择，请输入 0-2。"
+        ;;
+    esac
+  done
+}
+
+relay_menu() {
+  while true; do
+    cat <<EOF
+
+Relay 转发（前置 + 中转机）
+ 1) 配置-F relay 入口机 
+ 2) 配置-L relay 中转机
+ 3) 检查/列出已配置的 Relay 转发
+ 0) 返回
+EOF
+    read -rp "请选择: " rch
+    case "$rch" in
+      1)
+        add_relay_forward  # 你可以实现该函数（我可以直接写）
+        ;;
+      2)
+        add_relay_listen
+        ;;
+      3)
+        # list_transfers_table 或自定义过滤 .handler.type == "relay"
+        echo "列出所有 handler.type == relay 的服务:"
+        api_get "/config/services" | jq '.data.services[]? | select(.handler.type=="relay") | {name,addr,listener,handler,forwarder}'
+        pause
+        ;;
+      0) break ;;
+      *) echo "无效选择" ;;
+    esac
+  done
+}
+
+
+
 
 # ========== 主菜单 ==========
 while true; do
@@ -1282,7 +1995,7 @@ API: ${API_URL}
 1) 安装 GOST
 2) 卸载 GOST
 ══════════════════════════════════════════════════════════
-3) 添加转发（TCP+UDP）
+3) 添加转发
 4) 列出所有转发
 5) 删除转发服务
 6) 重载服务
@@ -1297,7 +2010,7 @@ EOF
   case "$ch" in
     1) install_gost_and_setup ;;
     2) uninstall_gost ;; 
-    3) add_forward_combined ;;
+    3) add_forward_menu ;;
     4) list_transfers_table ;;
     5) delete_forward ;;
     6) reload_or_restart_menu ;;
