@@ -1,5 +1,5 @@
 #!/usr/bin/env bash 
-# gost-api-cli.sh — GOST API 管理脚本（修复版）
+# gost-api-cli.sh — GOST API 管理脚本
 set -u
 
 API_URL="${GOST_API_URL:-http://127.0.0.1:18080}"
@@ -1983,7 +1983,7 @@ while true; do
   cat <<EOF
 
 ══════════════════════════════════════════════════════════
-           GOST API 管理工具 V1.1 2025/11/7
+           GOST API 管理工具 V1.2 2025/11/11
 仓库地址：https://github.com/lengmo23/Gostapi_forward
 ══════════════════════════════════════════════════════════
 $(get_gost_status)
