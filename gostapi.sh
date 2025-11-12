@@ -179,65 +179,63 @@ install_gost_and_setup() {
   }
 
   # 决定是否使用 GitHub 镜像（如果在中国大陆会提示）
-decide_github_proxy_for_cn() {
-  DOWNLOAD_PREFIX=""
-  local PROXIES=( \
-    "https://ghproxy.com/https://"
-    "https://ghproxy.net/https://"
-    "https://ghproxy.org/https://"
-    "https://download.fastgit.org/https://"
-    "https://ghproxy.cn/https://"
-  )
-  local country=""
-  # 多个服务尝试，提高成功率
-  country=$(curl -s --max-time 3 https://ipapi.co/country 2>/dev/null || true)
-  country=${country:-$(curl -s --max-time 3 https://ipinfo.io/country 2>/dev/null || true)}
-  country=${country:-$(curl -s --max-time 3 https://ifconfig.co/country_code 2>/dev/null || true)}
-  country=$(echo -n "${country}" | tr '[:lower:]' '[:upper:]')
+  decide_github_proxy_for_cn() {
+    DOWNLOAD_PREFIX=""
+    local PROXIES=( \
+      "https://ghproxy.com/https://"
+      "https://ghproxy.net/https://"
+      "https://ghproxy.org/https://"
+      "https://download.fastgit.org/https://"
+      "https://ghproxy.cn/https://"
+    )
+    local country=""
+    # 多个服务尝试，提高成功率
+    country=$(curl -s --max-time 3 https://ipapi.co/country 2>/dev/null || true)
+    country=${country:-$(curl -s --max-time 3 https://ipinfo.io/country 2>/dev/null || true)}
+    country=${country:-$(curl -s --max-time 3 https://ifconfig.co/country_code 2>/dev/null || true)}
+    country=$(echo -n "${country}" | tr '[:lower:]' '[:upper:]')
 
-  if [ "${country}" = "CN" ]; then
-    echo "检测到可能位于中国大陆 (country=${country})，建议使用镜像以加速下载。"
-    read -e -rp "是否使用镜像下载二进制以加速? (Y/n) " yn
-    yn=${yn:-Y}
-    if [[ "${yn}" =~ ^[Yy]$ ]]; then
-      for p in "${PROXIES[@]}"; do
-        # 测试代理能否访问 raw.githubusercontent.com（HEAD）
-        if curl -s --head --max-time 4 "${p}raw.githubusercontent.com/" >/dev/null 2>&1; then
-          DOWNLOAD_PREFIX="$p"
-          echo "选用镜像: ${DOWNLOAD_PREFIX}"
-          break
+    if [ "${country}" = "CN" ]; then
+      echo "检测到可能位于中国大陆 (country=${country})，建议使用镜像以加速下载。"
+      read -e -rp "是否使用镜像下载二进制以加速? (Y/n) " yn
+      yn=${yn:-Y}
+      if [[ "${yn}" =~ ^[Yy]$ ]]; then
+        for p in "${PROXIES[@]}"; do
+          # 测试代理能否访问 raw.githubusercontent.com（HEAD）
+          if curl -s --head --max-time 4 "${p}raw.githubusercontent.com/" >/dev/null 2>&1; then
+            DOWNLOAD_PREFIX="$p"
+            echo "选用镜像: ${DOWNLOAD_PREFIX}"
+            break
+          fi
+        done
+        if [ -z "$DOWNLOAD_PREFIX" ]; then
+          echo "未检测到可用镜像代理，是否仍尝试使用首选代理 ${PROXIES[0]} ?"
+          read -e -rp "(y/N) " yn2
+          if [[ "${yn2}" =~ ^[Yy]$ ]]; then
+            DOWNLOAD_PREFIX="${PROXIES[0]}"
+          fi
         fi
-      done
-      if [ -z "$DOWNLOAD_PREFIX" ]; then
-        echo "未检测到可用镜像代理，是否仍尝试使用首选代理 ${PROXIES[0]} ?"
-        read -e -rp "(y/N) " yn2
-        if [[ "${yn2}" =~ ^[Yy]$ ]]; then
-          DOWNLOAD_PREFIX="${PROXIES[0]}"
-        fi
+      else
+        DOWNLOAD_PREFIX=""
+        echo "将不使用镜像，直接从 GitHub 下载（可能较慢/失败）。"
       fi
     else
+      # 非中国大陆，直接跳过，无需询问（按你的要求）
       DOWNLOAD_PREFIX=""
-      echo "将不使用镜像，直接从 GitHub 下载（可能较慢/失败）。"
     fi
-  else
-    # 非中国大陆，直接跳过，无需询问
-    DOWNLOAD_PREFIX=""
-  fi
 
-  if [ -n "$DOWNLOAD_PREFIX" ]; then
-    echo "注意：使用第三方镜像可能会将下载请求路由到该服务，请在受信任环境使用。"
-  fi
+    if [ -n "$DOWNLOAD_PREFIX" ]; then
+      echo "注意：使用第三方镜像可能会将下载请求路由到该服务，请在受信任环境使用。"
+    fi
 
-  export DOWNLOAD_PREFIX
-  return 0
-}
-
+    export DOWNLOAD_PREFIX
+    return 0
+  }
 
   # ---------- 1) 若 API 已可达，则认为已安装并退出 ----------
   local existing_code
   existing_code=$(_get_api_code)
   if [ "$existing_code" = "200" ]; then
-    # 打印人类可读状态（若用户已有 check_gost_api_status 函数，调用它）
     if declare -f check_gost_api_status >/dev/null 2>&1; then
       check_gost_api_status
     else
@@ -248,11 +246,14 @@ decide_github_proxy_for_cn() {
   fi
 
   echo "开始安装 GOST（因 API 当前不可用）..."
-  # 2) 安装缺失依赖（仅安装缺失项）
+  # 2) 安装缺失依赖（仅安装缺失项），保证 curl/jq 可用后再检测 IP
   ensure_dependencies "$SUDO" || true
 
+  # 2.5) 立即决定是否使用镜像（如果在 CN 会提示并设置 DOWNLOAD_PREFIX）
+  decide_github_proxy_for_cn
+
   # 3) 查找 GitHub Release 的 asset（latest）
-  local UNAME_M ARCH_LABEL latest_json api_url asset_url tag_name
+  local UNAME_M ARCH_LABEL latest_json api_url asset_url tag_name try_api_url
   UNAME_M=$(uname -m 2>/dev/null || echo "x86_64")
   case "$UNAME_M" in
     x86_64|amd64) ARCH_LABEL="linux_amd64" ;;
@@ -262,7 +263,23 @@ decide_github_proxy_for_cn() {
   esac
 
   api_url="https://api.github.com/repos/go-gost/gost/releases/latest"
-  latest_json=$(curl -fsSL "${api_url}" 2>/dev/null || "")
+
+  # 如果已选用 DOWNLOAD_PREFIX，则优先尝试通过镜像去请求 release JSON（部分镜像支持）
+  latest_json=""
+  if [ -n "${DOWNLOAD_PREFIX:-}" ]; then
+    try_api_url="${DOWNLOAD_PREFIX}api.github.com/repos/go-gost/gost/releases/latest"
+    latest_json=$(curl -fsSL "${try_api_url}" 2>/dev/null || echo "")
+    if [ -n "$latest_json" ]; then
+      echo "已通过镜像获取 release 信息（${try_api_url}）"
+    else
+      # 回退到官方 API
+      latest_json=$(curl -fsSL "${api_url}" 2>/dev/null || echo "")
+      echo "镜像获取 release 失败，回退到官方 API 获取 release 信息。"
+    fi
+  else
+    latest_json=$(curl -fsSL "${api_url}" 2>/dev/null || echo "")
+  fi
+
   if [ -z "$latest_json" ]; then
     echo "错误：无法从 GitHub API 获取 release 信息（网络或被限流）。"
     return 1
@@ -283,11 +300,8 @@ decide_github_proxy_for_cn() {
 
   echo "发现 release: ${tag_name:-<unknown>}"
 
-  # 4) 决定是否使用 GitHub 镜像（会设置 DOWNLOAD_PREFIX）
-  decide_github_proxy_for_cn
-
   # 5) 下载：优先使用 DOWNLOAD_PREFIX（若为空则直接下载 asset_url）
-  local tmpdir gost_candidate dest cfg download_url
+  local tmpdir gost_candidate dest cfg download_url direct_url
   tmpdir=$(mktemp -d /tmp/gost_install.XXXXXX)
   trap 'rm -rf "$tmpdir" >/dev/null 2>&1 || true' EXIT
   cd "$tmpdir" || return 3
@@ -299,14 +313,15 @@ decide_github_proxy_for_cn() {
   else
     download_url="${asset_url}"
   fi
+  direct_url="${asset_url}"
 
   echo "下载中（尝试）: ${download_url}"
   if ! curl -fsSL -o gost_release.tar.gz "${download_url}"; then
     echo "警告：使用首选方式下载失败： ${download_url}"
     # 如果使用了代理，回退到直连尝试一次
     if [ -n "${DOWNLOAD_PREFIX:-}" ]; then
-      echo "回退到直连下载（不使用镜像）: ${asset_url}"
-      if ! curl -fsSL -o gost_release.tar.gz "${asset_url}"; then
+      echo "回退到直连下载（不使用镜像）: ${direct_url}"
+      if ! curl -fsSL -o gost_release.tar.gz "${direct_url}"; then
         echo "错误：直连下载也失败，安装终止。"
         rm -rf "$tmpdir" || true
         return 4
@@ -378,15 +393,12 @@ EOF
 
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable --now gost.service || true
-    # restart to ensure latest binary/config applied
     $SUDO systemctl restart gost.service >/dev/null 2>&1 || $SUDO service gost restart >/dev/null 2>&1 || true
 
-    # 短暂等待再检测
     sleep 2
 
     local api_code
     api_code=$(_get_api_code)
-    # 打印友好状态（优先调用用户自定义函数）
     if declare -f check_gost_api_status >/dev/null 2>&1; then
       check_gost_api_status
     else
@@ -411,7 +423,6 @@ EOF
   else
     echo "未检测到 systemd，已安装二进制并写入配置 ${cfg}。请手动后台运行："
     echo "  sudo nohup ${dest} -C ${cfg} >/var/log/gost.log 2>&1 &"
-    # 打印状态供参考
     if declare -f check_gost_api_status >/dev/null 2>&1; then
       check_gost_api_status
     fi
@@ -420,6 +431,7 @@ EOF
     return 0
   fi
 }
+
 
 
 
@@ -881,18 +893,18 @@ add_relay_forward() {
 
   echo
   echo "请选择中转机的加密方式（dialer 传输类型）:"
-  echo " 1) tcp   （不加密，默认）"
-  echo " 2) tls   （TCP + TLS）"
-  echo " 3) ws    （WebSocket）"
-  echo " 4) wss   （加密 WebSocket）"
-  echo " 5) kcp   （基于 UDP 的快速传输）"
+  echo " 1) tls   （TLS默认）"
+  echo " 2) ws    （WebSocket）"
+  echo " 3) wss   （加密 WebSocket）"
+  echo " 4) kcp   （基于 UDP 的快速传输）"
+  echo " 5) tcp   （不加密）"
   read -e -rp "输入选项 [1-5] (默认 1): " dial_opt
   case "$dial_opt" in
-    2) DIAL_TYPE="tcp"; DIAL_TLS="yes"  ;;
-    3) DIAL_TYPE="ws";  DIAL_TLS="no"   ;;
-    4) DIAL_TYPE="ws";  DIAL_TLS="yes"  ;;
-    5) DIAL_TYPE="kcp"; DIAL_TLS="no"   ;;
-    *) DIAL_TYPE="tcp"; DIAL_TLS="no"   ;;
+    2) DIAL_TYPE="ws";  DIAL_TLS="no"   ;;
+    3) DIAL_TYPE="ws";  DIAL_TLS="yes"  ;;
+    4) DIAL_TYPE="kcp"; DIAL_TLS="no"   ;;
+    5) DIAL_TYPE="tcp"; DIAL_TLS="no"   ;;
+    *) DIAL_TYPE="tls"; DIAL_TLS="yes"  ;;
   esac
 
   # ===== 中转 auth（username/password） =====
@@ -993,7 +1005,18 @@ JSON
 )
 
   # 构造 node json（connector + dialer），将 connector 包含 auth
-  if [ "$DIAL_TYPE" = "kcp" ]; then
+  if [ "$DIAL_TYPE" = "tls" ]; then
+    node_json=$(cat <<JSON
+{
+  "name": "${node_name}",
+  "addr": "${addr_part}",
+  "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
+  "dialer": { "type": "tls", "tls": {"serverName": "${host_only}"}  }
+}
+JSON
+)
+
+  elif [ "$DIAL_TYPE" = "kcp" ]; then
     node_json=$(cat <<JSON
 {
   "name": "${node_name}",
@@ -1010,7 +1033,7 @@ JSON
   "name": "${node_name}",
   "addr": "${addr_part}",
   "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
-  "dialer": { "type": "ws", "tls": { "serverName": "${host_only}", "secure": true } }
+  "dialer": { "type": "ws", "tls": { "serverName": "${host_only}"} }
 }
 JSON
 )
@@ -1026,19 +1049,7 @@ JSON
 )
     fi
   else
-    # tcp (可能带 tls)
-    if [ "$DIAL_TLS" = "yes" ]; then
-      node_json=$(cat <<JSON
-{
-  "name": "${node_name}",
-  "addr": "${addr_part}",
-  "connector": { "type": "relay", "auth": { "username": "${auth_user}", "password": "${auth_pass}" } },
-  "dialer": { "type": "tcp", "tls": { "serverName": "${host_only}", "secure": true } }
-}
-JSON
-)
-    else
-      node_json=$(cat <<JSON
+    node_json=$(cat <<JSON
 {
   "name": "${node_name}",
   "addr": "${addr_part}",
@@ -1047,7 +1058,6 @@ JSON
 }
 JSON
 )
-    fi
   fi
 
   # chain payload (single hop single node)
@@ -2100,8 +2110,9 @@ while true; do
   cat <<EOF
 
 ══════════════════════════════════════════════════════════
-           GOST API 管理工具 V1.2.1 2025/11/11
+           GOST API 管理工具 V1.2.2 2025/11/12
 仓库地址：https://github.com/lengmo23/Gostapi_forward
+V1.2.2 修复Relay转发TLS加密失败问题
 ══════════════════════════════════════════════════════════
 $(get_gost_status)
 
