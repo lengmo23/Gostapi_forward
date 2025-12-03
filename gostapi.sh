@@ -344,6 +344,56 @@ EOF
 }
 
 
+# ========== 保存配置到文件（JSON 版，保留 services[].status） ==========
+save_config_to_file() {
+  local cfg="${CONFIG_FILE}"
+  local config_data tmp jq_ok
+
+  # 从 API 拉取完整配置
+  config_data=$(api_get_raw "/config")
+  if [ -z "$(echo -n "${config_data}" | tr -d ' \t\r\n')" ]; then
+    echo "错误：无法从 API 获取配置（空响应）。" >&2
+    return 1
+  fi
+
+  # 验证是不是合法 JSON
+  if ! echo "${config_data}" | jq empty >/dev/null 2>&1; then
+    echo "错误：从 API 获取的内容不是有效 JSON；未保存。" >&2
+    printf "%s\n" "${config_data}" > "${cfg}.raw.$(date +%s)" 2>/dev/null || true
+    echo "原始响应已另存为 ${cfg}.raw.TIMESTAMP（用于调试）" >&2
+    return 2
+  fi
+
+  # 确保目录存在
+  mkdir -p "$(dirname "${cfg}")" 2>/dev/null || true
+
+  tmp="$(mktemp "${cfg}.tmp.XXXXXX")" || tmp="/tmp/gost_config_tmp.$$"
+
+  # 若有 jq 则做漂亮的格式化输出，否则直接写入
+  if command -v jq >/dev/null 2>&1; then
+    echo "${config_data}" | jq '.' > "${tmp}" 2>/dev/null || {
+      echo "错误：jq 格式化失败，未保存。" >&2
+      rm -f "${tmp}" 2>/dev/null || true
+      return 3
+    }
+  else
+    printf "%s\n" "${config_data}" > "${tmp}" || {
+      echo "错误：写入临时文件失败。" >&2
+      rm -f "${tmp}" 2>/dev/null || true
+      return 4
+    }
+  fi
+
+  # 原子替换目标文件（安静）
+  if ! mv -f "${tmp}" "${cfg}" 2>/dev/null; then
+    echo "错误：无法移动临时文件到 ${cfg}（权限不足？）" >&2
+    rm -f "${tmp}" 2>/dev/null || true
+    return 5
+  fi
+
+  # 静默成功返回
+  return 0
+}
 
 
 # ========== 列表展示函数 (修复版V3：强制显示所有分类) ==========
