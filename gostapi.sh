@@ -190,8 +190,7 @@ install_gost_and_setup() {
     armv7*|armv6*) ARCH_LABEL="linux_armv7"; ARCH_FILE_SUFFIX="linux_armv7" ;;
     *) ARCH_LABEL="linux_amd64"; ARCH_FILE_SUFFIX="linux_amd64" ;;
   esac
-
-  # ---------- 3) 智能镜像选择 ----------
+# ---------- 3) 智能镜像选择 ----------
   DOWNLOAD_PREFIX=""
   local PROXIES=( \
     "https://mirror.ghproxy.com/" \
@@ -201,26 +200,31 @@ install_gost_and_setup() {
   
   echo "正在检测网络环境..."
   local country=""
-  country=$(curl -s --max-time 2 https://ipapi.co/country 2>/dev/null || true)
+  country=$(curl -s --max-time 2 "http://ip-api.com/line/?fields=countryCode" 2>/dev/null || true)
+  
+  # 去除可能存在的空白字符
+  country=$(echo "$country" | tr -d ' \t\n\r')
+  
+  # 如果获取失败或为空，默认为 CN (保障 NAT 机器能走镜像)
   [ -z "$country" ] && country="CN"
   
   if [ "$country" = "CN" ]; then
       echo "检测到中国大陆环境 (或网络受限)，启用镜像加速。"
       for p in "${PROXIES[@]}"; do
-          # [修改点] 测试时手动补全完整的测试地址
-          # 检查 p + https://github.com 是否连通
+          # 检查连通性: Mirror + https://github.com
           if curl -s --head --max-time 3 "${p}https://github.com" >/dev/null 2>&1; then
               DOWNLOAD_PREFIX="$p"
               echo "选用镜像: ${DOWNLOAD_PREFIX}"
               break
           fi
       done
+      # 兜底
       if [ -z "$DOWNLOAD_PREFIX" ]; then
           DOWNLOAD_PREFIX="${PROXIES[0]}"
           echo "镜像探测超时，强制使用: ${DOWNLOAD_PREFIX}"
       fi
   else
-      echo "检测到非中国大陆环境，直接连接 GitHub。"
+      echo "检测到非中国大陆环境 (IP归属: $country)，直接连接 GitHub。"
   fi
 
   # ---------- 4) 获取版本与下载链接 ----------
